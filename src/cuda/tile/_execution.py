@@ -10,12 +10,14 @@ from typing import TYPE_CHECKING
 
 from cuda.tile._by_target import ByTarget
 from cuda.tile._cext import TileDispatcher, TileContext
+from cuda.tile._cext import launch as _cext_launch
+from cuda.tile._cext import default_tile_context
 from cuda.tile._dispatch_mode import DispatchMode
 
 if TYPE_CHECKING:
     from cuda.tile.compilation import KernelSignature
 
-__all__ = ("function", "kernel", "stub")
+__all__ = ("function", "kernel", "stub", "launch", "compile_kernel")
 
 
 ###############################################################################
@@ -124,9 +126,29 @@ class kernel(TileDispatcher):
         self._compiler_options = compiler_options
 
     def _compile(self, signature: KernelSignature, context: TileContext):
-        from cuda.tile._compile import compile_tile, get_sm_arch
+        from cuda.tile._compile import compile_tile, get_sm_arch, parse_bytecode_version
+        from cuda.tile import _backend
+
+        sm_arch = _backend.get_sm_arch_override() or get_sm_arch()
+        compile_fn = _backend.get_compile_fn()
+        if compile_fn is not None:
+            # Custom backend: compile to TileIR bytecode and let the hook turn
+            # it into a backend binary instead of a CUDA cubin.
+            bc_ver = _backend.get_bytecode_version_override()
+            bytecode_version = parse_bytecode_version(bc_ver) if bc_ver else None
+            result = compile_tile(self._annotated_function, (signature,),
+                                  sm_arch, self._compiler_options, context,
+                                  bytecode_version=bytecode_version,
+                                  return_bytecode=True, return_cubin=False)
+            [kernel_sig] = result.kernel_signatures
+            binary = compile_fn(bytes(result.bytecode),
+                                symbol=kernel_sig.symbol,
+                                sm_arch=sm_arch,
+                                signature=kernel_sig)
+            return binary, kernel_sig.symbol, None, []
+
         result = compile_tile(self._annotated_function, (signature,),
-                              get_sm_arch(), self._compiler_options, context)
+                              sm_arch, self._compiler_options, context)
         [kernel_sig] = result.kernel_signatures
         return result.cubin, kernel_sig.symbol, None, []
 
@@ -193,3 +215,33 @@ def is_stub(func) -> bool:
 
 def is_function_wrapper(func) -> bool:
     return getattr(func, "_cutile_function_wrapper", False)
+
+
+def compile_kernel(kernel: "kernel",
+                   signature: "KernelSignature",
+                   context: TileContext = default_tile_context):
+    """Compile a kernel for a single signature into a launchable binary.
+
+    Routes through the registered backend ``compile_fn`` when one is set
+    (see :func:`cuda.tile.set_backend`), otherwise produces a CUDA cubin.
+
+    Returns:
+        ``(binary, symbol)``: the compiled binary bytes and the kernel symbol
+        name.
+    """
+    binary, symbol, _dyn_smem, _tensor_maps = kernel._compile(signature, context)
+    return binary, symbol
+
+
+def launch(stream, grid, kernel, kernel_args, /):
+    """Queue a kernel for execution over a grid.
+
+    When a custom backend launch hook is registered via
+    :func:`cuda.tile.set_backend`, execution is delegated to it; otherwise the
+    default CUDA driver launch path is used.
+    """
+    from cuda.tile import _backend
+    launch_fn = _backend.get_launch_fn()
+    if launch_fn is not None:
+        return launch_fn(stream, grid, kernel, kernel_args)
+    return _cext_launch(stream, grid, kernel, kernel_args)

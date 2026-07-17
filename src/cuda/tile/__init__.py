@@ -4,7 +4,7 @@
 
 from cuda.tile._version import __version__  # noqa
 
-from cuda.tile._cext import launch
+from cuda.tile._backend import set_backend, clear_backend, backend_active
 
 from cuda.tile._by_target import ByTarget
 
@@ -170,13 +170,19 @@ from cuda.tile import tune
 
 from cuda.tile._execution import (
     function,
-    kernel
+    kernel,
+    launch,
+    compile_kernel,
 )
 
 import cuda.tile.compilation as compilation
 
 __all__ = [
     "launch",
+    "compile_kernel",
+    "set_backend",
+    "clear_backend",
+    "backend_active",
 
     "ByTarget",
 

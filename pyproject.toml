@@ -7,6 +7,7 @@ build-backend = "setuptools.build_meta"
 requires = [
     "setuptools==80.10.2",
     "wheel",
+    "cmake",
 ]
 
 [project]
