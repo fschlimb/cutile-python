@@ -230,8 +230,8 @@ def _xeas_api(options: dict,
     return params, kwargs
 
 
-def _xerun_api(options: dict) -> tuple[str, dict]:
-    """Build ``(entry_point, kwargs)`` for xerun from flat options."""
+def _xerun_api(options: dict) -> dict:
+    """Build ``kwargs`` for xerun from flat options."""
     zpath = os.environ.get("LZ_RT_LIB_PATH", None)
     assert zpath is not None, "XPU backend: LZ_RT_LIB_PATH must be set to your libmlir_levelzero_runtime.so"
     kwargs = {
@@ -240,7 +240,7 @@ def _xerun_api(options: dict) -> tuple[str, dict]:
         # "nruns": options.get("nruns", 1000),
         "library_path": zpath,
     }
-    return _ENTRY_POINT, kwargs
+    return kwargs
 
 
 # Map torch dtypes to cuTile DTypes. Extend as needed.
@@ -427,7 +427,7 @@ def _run_tileir_to_mlir(tool: str, bytecode: bytes) -> str:
     argv = [tool, "--tileir-to-mlir-pipeline",
             "--convert-memref-args-to-ranked-memref",
             "--loop-invariant-code-motion", "-canonicalize", "-cse",]
-            # "--mlir-print-ir-before-all"]
+            # "--mlir-print-ir-after-all"]
     try:
         proc = subprocess.run(argv, input=bytecode, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, check=False)
@@ -498,7 +498,7 @@ def launch(stream, grid, kernel, args):
     the entry function once.
     """
     options = getattr(_tls, "options", None) or {}
-    run_entry, run_kwargs = _xerun_api(options)
+    run_kwargs = _xerun_api(options)
 
     sig = build_signature(kernel, args)
     input_shape = _input_shape_from_args(sig, args)
@@ -518,4 +518,4 @@ def launch(stream, grid, kernel, args):
 
         wg_m, wg_n, _ = _tile_from_options(options)
         block = _block(options, wg_m, wg_n)
-        xerun(binary, run_entry, runtime_args, grid, block, **run_kwargs)
+        xerun(binary, sig.symbol, runtime_args, grid, block, **run_kwargs)
