@@ -210,8 +210,9 @@ def cutile_fmha(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor,
         "m": tile_m,
         "n": tile_n,
         "k": D_k,
-        "k_tile": D_k,
+        "block_threads": (1, 32, 16),
         "flops": 2 * Batch * Heads * SeqLen_Q * SeqLen_KV * (D_k + D_v),
+        "assume_in_bounds": True,
         **(options or {}),
     }
 
@@ -330,8 +331,8 @@ if __name__ == "__main__":
     # --- User Configuration ---
     BATCH_SIZE = 2
     NUM_HEADS = 8
-    SEQ_LEN_Q = 128
-    SEQ_LEN_KV = 128
+    SEQ_LEN_Q = 512
+    SEQ_LEN_KV = 512
     D_K = 64
     D_V = 64
 

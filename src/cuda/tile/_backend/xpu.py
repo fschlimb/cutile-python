@@ -6,14 +6,16 @@ import contextlib
 import tempfile
 import threading
 
+import numpy as np
+
 import cuda.tile as ct
 from cuda.tile.compilation import (
     KernelSignature, CallingConvention,
     ArrayConstraint, ScalarConstraint, ConstantConstraint,
 )
 
-from lighthouse.tools.xeas import xeas
-from lighthouse.tools.xerun import xerun
+from lighthouse.pipeline.xegpu.xeas import xeas
+from lighthouse.execution.xegpu.xelaunch import xelaunch
 from lighthouse import dialects as _lh_dialects
 from mlir import ir
 
@@ -34,7 +36,7 @@ sm_arch = get_sm_arch_xpu("b70")
 # compiler (which requires a CUDA toolkit) to auto-detect it.
 bytecode_version = "13.3"
 
-# Host launcher / entry function name shared by the compile stages and xerun.
+# Host launcher / entry function name shared by the compile stages and xelaunch.
 _ENTRY_POINT = "payload"
 _BENCH_NAME = "benchmark"
 
@@ -87,6 +89,7 @@ def compile_options(options: dict):
         =================== ========== ========================== ==========================
         key                 kernels    required?                  meaning
         =================== ========== ========================== ==========================
+        block               all        optional                   launch block (overrides derived)
         wg_m, wg_n          all        yes                        work-group tile sizes
         m, n, k             matmul     by matmul schedule         problem sizes
         k_tile              matmul     optional                   reduction tile size
@@ -97,16 +100,16 @@ def compile_options(options: dict):
         load_a_m, load_a_k  matmul     optional                   DPAS load tile for A
         load_b_k, load_b_n  matmul     optional                   DPAS load tile for B
         load_m, load_n      elemwise   optional                   elementwise load tile sizes
-        prefetch_a_m,       matmul     optional (all-or-nothing)  cooperative prefetch A
+        prefetch_a_m,       matmul     optional                   cooperative prefetch A
             prefetch_a_k
-        prefetch_b_k,       matmul     optional (all-or-nothing)  cooperative prefetch B
+        prefetch_b_k,       matmul     optional                   cooperative prefetch B
             prefetch_b_n
-        prefetch_a_nb       matmul     optional (all-or-nothing)  initial A prefetch count
-        prefetch_b_nb       matmul     optional (all-or-nothing)  initial B prefetch count
+        prefetch_a_nb       matmul     optional                   initial A prefetch count
+        prefetch_b_nb       matmul     optional                   initial B prefetch count
         assume_in_bounds    all        optional                   mark transfers in-bounds
         xegpu_op_level      all        optional                   initial XeGPU op level
         large_register_file all        optional                   enable large register file
-        flops               all        optional                   benchmark flop count (xerun)
+        flops               all        optional                   benchmark flop count (xelaunch)
         nwarmup             all        optional                   benchmark warmup runs
         nruns               all        optional                   benchmark timed runs
         =================== ========== ========================== ==========================
@@ -115,8 +118,8 @@ def compile_options(options: dict):
         omitted, this backend derives compatible defaults from ``wg_m/wg_n``.
 
     The matmul subgroup / prefetch tile keys (``sg_*`` through
-    ``prefetch_*_nb``) are all-or-nothing: provide every one, or none and let
-    xeas pick them.
+    ``prefetch_*_nb``) may be given partially: xeas keeps what is provided and
+    derives the parameters that depend on it.
 
     Example::
 
@@ -133,8 +136,8 @@ def compile_options(options: dict):
 
 # Matmul parameters understood by xeas (its ``params`` dict). ``compile_options``
 # keys matching these names are passed straight through; ``m``/``n``/``k`` are
-# required and the subgroup/prefetch tile keys are all-or-nothing (xeas fills
-# them otherwise). ``wg_m``/``wg_n``/``k_tile`` are provided separately as
+# required and the subgroup/prefetch tile keys are optional (xeas derives the
+# missing ones). ``wg_m``/``wg_n``/``k_tile`` are provided separately as
 # explicit compile options and injected into this params dict.
 _XEAS_PARAM_KEYS = (
     "m", "n", "k", "device", "transpose_a", "transpose_b",
@@ -186,12 +189,13 @@ def _xeas_params(options: dict, wg_m: int, wg_n: int, k_tile: int | None) -> dic
     return params
 
 
-def _block(options: dict, wg_m: int, wg_n: int) -> tuple:
+def _block(options: dict, block_threads, wg_m: int, wg_n: int) -> tuple:
     """Launch block ``((wg_m // sg_m) * (wg_n // sg_n) * 16, 1, 1)``.
-
     ``wg_m``/``wg_n`` are supplied from options. Falls back to
     :data:`_DEFAULT_BLOCK` unless ``sg_m``/``sg_n`` are both provided.
     """
+    if block_threads is not None:
+        return block_threads
     if wg_m is None or wg_n is None:
         return _DEFAULT_BLOCK
     keys = ("sg_m", "sg_n")
@@ -201,37 +205,23 @@ def _block(options: dict, wg_m: int, wg_n: int) -> tuple:
     return ((wg_m // sg_m) * (wg_n // sg_n) * _NB_WORKITEMS, 1, 1)
 
 
-def _xeaddlauncher_api(options: dict,
-                       grid,
-                       wg_m: int | None,
-                       wg_n: int | None) -> dict:
-    """Build xeaddlauncher kwargs from flat options."""
-    kwargs = {
-        "entry_point": _ENTRY_POINT,
-        "grid": grid,
-        "block": _block(options, wg_m, wg_n),
-    }
-    if wg_m is not None and wg_n is not None:
-        kwargs["wg_tile"] = (wg_m, wg_n)
-    return kwargs
-
-
 def _xeas_api(options: dict,
               wg_m: int | None,
               wg_n: int | None,
               k_tile: int | None) -> tuple[dict, dict]:
     """Build ``(params, kwargs)`` for xeas from flat options."""
     params = _xeas_params(options, wg_m, wg_n, k_tile)
+    # print(options)
     kwargs = {
-        "assume_in_bounds": options.get("assume_in_bounds", True),
+        "assume_in_bounds": options.get("assume_in_bounds", False),
         "xegpu_op_level": options.get("xegpu_op_level", "workgroup"),
         "large_register_file": options.get("large_register_file", True),
     }
     return params, kwargs
 
 
-def _xerun_api(options: dict) -> dict:
-    """Build ``kwargs`` for xerun from flat options."""
+def _xelaunch_api(options: dict) -> dict:
+    """Build ``kwargs`` for xelaunch from flat options."""
     zpath = os.environ.get("LZ_RT_LIB_PATH", None)
     assert zpath is not None, "XPU backend: LZ_RT_LIB_PATH must be set to your libmlir_levelzero_runtime.so"
     kwargs = {
@@ -378,6 +368,7 @@ def build_signature(kernel, args,
 
     constraints = []
     for i, a in enumerate(args):
+        print(f"arg {i}: {a} (type={type(a).__name__}) {'constant' if const_mask[i] else 'runtime'}")
         if const_mask[i]:
             if not isinstance(a, bool | int | float):
                 raise TypeError(
@@ -424,10 +415,16 @@ def _run_tileir_to_mlir(tool: str, bytecode: bytes) -> str:
     run as a subprocess. Raises ``RuntimeError`` with the captured stderr on
     failure.
     """
-    argv = [tool, "--tileir-to-mlir-pipeline",
-            "--convert-memref-args-to-ranked-memref",
-            "--loop-invariant-code-motion", "-canonicalize", "-cse",]
-            # "--mlir-print-ir-after-all"]
+    options = getattr(_tls, "options", None) or {}
+    block_threads = options.get("block_threads")
+    wg_m, wg_n, _ = _tile_from_options(options)
+    block = _block(options, block_threads, wg_m, wg_n)
+    assume_in_bounds = str(options.get("assume_in_bounds", False)).lower()
+    argv = [tool,
+            f"--tileir-to-mlir-pipeline=drop-rounding-modes=true known-block-size={','.join(map(str, block))} assume-in-bounds={assume_in_bounds}",
+            "--convert-memref-args-to-ranked-memref=remove-unused=assumed-memref-dependent",
+            "--loop-invariant-code-motion", "-canonicalize", "-cse",
+            "--mlir-print-ir-after-all"]
     try:
         proc = subprocess.run(argv, input=bytecode, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, check=False)
@@ -447,7 +444,7 @@ def _run_tileir_to_mlir(tool: str, bytecode: bytes) -> str:
     if proc.stderr:
         sys.stderr.write(proc.stderr.decode(errors="replace"))
         sys.stderr.flush()
-
+    print(proc.stdout.decode())
     return proc.stdout.decode()
 
 
@@ -476,46 +473,74 @@ def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
     return result
 
 
-def _runtime_args_without_constants(signature: KernelSignature, args: tuple) -> list:
-    """Return runtime arguments with compile-time constants removed.
+def _scalar_arg(value, constraint: ScalarConstraint):
+    """Convert a runtime scalar to the NumPy value matching its ABI type."""
+    dtype = {
+        ct.int8: np.int8, ct.int16: np.int16,
+        ct.int32: np.int32, ct.int64: np.int64,
+        ct.uint8: np.uint8, ct.uint16: np.uint16,
+        ct.uint32: np.uint32, ct.uint64: np.uint64,
+        ct.float32: np.float32, ct.float64: np.float64,
+    }.get(constraint.dtype)
+    if dtype is None:
+        raise TypeError(f"XPU backend: unsupported scalar dtype {constraint.dtype}")
+    return dtype(value)
 
-    ``xerun`` consumes runtime buffer descriptors only. Constant scalar kernel
-    parameters are compile-time values and must not appear in that runtime list.
+
+def _runtime_kernel_args(signature: KernelSignature, args: tuple) -> list:
+    """Build the kernel argument list expected by the Xe kernel.
+
+    Compile-time constants are dropped (they are baked into the binary), tensors
+    are forwarded as-is (``xelaunch`` expands them into memref descriptors) and
+    scalars become NumPy values carrying their signature dtype (``xelaunch``
+    converts both to the kernel ABI).
     """
-    return [
-        arg
-        for arg, param in zip(args, signature.parameters)
-        if not isinstance(param, ConstantConstraint)
-    ]
+    import torch
+    flat = []
+    for arg, param in zip(args, signature.parameters):
+        if isinstance(param, ConstantConstraint):
+            continue
+        if isinstance(arg, torch.Tensor):
+            flat.append(arg)
+        elif isinstance(param, ScalarConstraint):
+            flat.append(_scalar_arg(arg, param))
+        else:
+            raise TypeError(
+                f"XPU backend: unsupported runtime argument {type(arg).__name__}")
+    return flat
 
 
 def launch(stream, grid, kernel, args):
     """Compile and launch kernel on the XPU.
 
     Compiles the kernel to a shared library, writes it to a temporary file and
-    hands it to the ``xerun`` Python API together with the runtime tensor
+    hands it to the ``xelaunch`` Python API together with the runtime tensor
     arguments (compile-time constants removed), which loads the library and runs
     the entry function once.
     """
     options = getattr(_tls, "options", None) or {}
-    run_kwargs = _xerun_api(options)
+    run_kwargs = _xelaunch_api(options)
 
     sig = build_signature(kernel, args)
     input_shape = _input_shape_from_args(sig, args)
     with _xe_context():
-        prev_grid = getattr(_tls, "grid", None)
-        prev_input_shape = getattr(_tls, "input_shape", None)
         _tls.grid = grid
         _tls.input_shape = input_shape
-        try:
-            binary, _ = ct.compile_kernel(kernel, sig)
-        finally:
-            _tls.grid = prev_grid
-            _tls.input_shape = prev_input_shape
+        binary, _ = ct.compile_kernel(kernel, sig)
             
-        # xerun only sees runtime values. Drop compile-time constants from args.
-        runtime_args = _runtime_args_without_constants(sig, args)
+        # xelaunch only sees runtime values. Drop compile-time constants from args
+        # and expand tensors into the memref descriptors the kernel ABI expects.
+        runtime_args = _runtime_kernel_args(sig, args)
 
+        # The Level Zero runtime behind xelaunch enqueues onto its own immediate
+        # command list, which is unordered with respect to ``stream``. Drain the
+        # caller's pending work (e.g. the tensor initialisation) first, otherwise
+        # it can land after the kernel and overwrite its results. xelaunch blocks
+        # until the kernel completed, so ordering is restored on the way out.
+        if stream is not None and hasattr(stream, "synchronize"):
+            stream.synchronize()
+
+        block_threads = options.get("block_threads")
         wg_m, wg_n, _ = _tile_from_options(options)
-        block = _block(options, wg_m, wg_n)
-        xerun(binary, sig.symbol, runtime_args, grid, block, **run_kwargs)
+        block = _block(options, block_threads, wg_m, wg_n)
+        xelaunch(binary, sig.symbol, runtime_args, grid, block, **run_kwargs)
