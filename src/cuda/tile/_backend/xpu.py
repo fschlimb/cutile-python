@@ -14,10 +14,10 @@ from cuda.tile.compilation import (
     ArrayConstraint, ScalarConstraint, ConstantConstraint,
 )
 
-from lighthouse.pipeline.xegpu.xeas import xeas
-from lighthouse.execution.xegpu.xelaunch import xelaunch
-from lighthouse import dialects as _lh_dialects
 from mlir import ir
+
+from .xeas import xeas
+from .xelaunch import xelaunch
 
 # Target string reported to the compiler. Setting this here makes
 # `get_sm_arch_override()` short-circuit so cuTile never probes a CUDA device
@@ -40,22 +40,15 @@ bytecode_version = "13.3"
 _ENTRY_POINT = "payload"
 _BENCH_NAME = "benchmark"
 
-# Single process-wide MLIR context with the lighthouse dialects registered.
-# The dialect extensions attach process-global transform-dialect interface
-# models on load; registering them more than once corrupts the transform
-# interpreter (aborting later with a failed ``cast<TransformOpInterface>``), so
-# the context is created and populated exactly once and reused by every launch.
+# Single process-wide MLIR context, created once and reused by every launch.
 _mlir_context = None
 
 
 def _xe_context():
-    """Return the shared MLIR context, creating and populating it on first use."""
+    """Return the shared MLIR context, creating it on first use."""
     global _mlir_context
     if _mlir_context is None:
-        ctx = ir.Context()
-        with ctx:
-            _lh_dialects.register_and_load()
-        _mlir_context = ctx
+        _mlir_context = ir.Context()
     return _mlir_context
 
 
@@ -74,13 +67,11 @@ def compile_options(options: dict):
     """Provide tuning parameters for the XPU compile, per kernel launch.
 
     ``options`` is a flat dict scoped to launches inside the ``with`` block.
-    Its keys are passed straight through to the lighthouse xe* Python APIs:
-    the matmul parameters go to ``xeas`` as its ``params`` dict and the
-    remaining keys are forwarded as ``xeas`` keyword arguments.
+    Its keys are forwarded as ``xeas`` keyword arguments or used to derive the
+    launch block.
 
     The work-group tiles ``wg_m``/``wg_n`` must be set explicitly in
-    ``options``. ``k_tile`` is optional and only needed by pipelines that use
-    it. Combined with ``sg_m``/``sg_n`` and a fixed ``nb_workitems=16``
+    ``options``. Combined with ``sg_m``/``sg_n`` and a fixed ``nb_workitems=16``
     they derive the launch block
     ``((wg_m // sg_m) * (wg_n // sg_n) * 16, 1, 1)``.
 
@@ -89,41 +80,18 @@ def compile_options(options: dict):
         =================== ========== ========================== ==========================
         key                 kernels    required?                  meaning
         =================== ========== ========================== ==========================
-        block               all        optional                   launch block (overrides derived)
+        block_threads       all        optional                   launch block (overrides derived)
         wg_m, wg_n          all        yes                        work-group tile sizes
-        m, n, k             matmul     by matmul schedule         problem sizes
         k_tile              matmul     optional                   reduction tile size
-        transpose_a         matmul     optional                   A is stored transposed
-        transpose_b         matmul     optional                   B is stored transposed
-        device              matmul     optional                   target GPU for selection
         sg_m, sg_n          all        optional                   subgroup tile size
-        load_a_m, load_a_k  matmul     optional                   DPAS load tile for A
-        load_b_k, load_b_n  matmul     optional                   DPAS load tile for B
-        load_m, load_n      elemwise   optional                   elementwise load tile sizes
-        prefetch_a_m,       matmul     optional                   cooperative prefetch A
-            prefetch_a_k
-        prefetch_b_k,       matmul     optional                   cooperative prefetch B
-            prefetch_b_n
-        prefetch_a_nb       matmul     optional                   initial A prefetch count
-        prefetch_b_nb       matmul     optional                   initial B prefetch count
         assume_in_bounds    all        optional                   mark transfers in-bounds
         xegpu_op_level      all        optional                   initial XeGPU op level
         large_register_file all        optional                   enable large register file
-        flops               all        optional                   benchmark flop count (xelaunch)
-        nwarmup             all        optional                   benchmark warmup runs
-        nruns               all        optional                   benchmark timed runs
         =================== ========== ========================== ==========================
-
-        For elemwise-like kernels (no ``m/n/k``), if ``sg_m/sg_n/load_m/load_n`` are
-        omitted, this backend derives compatible defaults from ``wg_m/wg_n``.
-
-    The matmul subgroup / prefetch tile keys (``sg_*`` through
-    ``prefetch_*_nb``) may be given partially: xeas keeps what is provided and
-    derives the parameters that depend on it.
 
     Example::
 
-        with xpu.compile_options({"m": M, "n": N, "k": K}):
+        with xpu.compile_options({"wg_m": 128, "wg_n": 128}):
             ct.launch(stream, grid, matmul_kernel, args)
     """
     prev = getattr(_tls, "options", None)
@@ -133,20 +101,6 @@ def compile_options(options: dict):
     finally:
         _tls.options = prev
 
-
-# Matmul parameters understood by xeas (its ``params`` dict). ``compile_options``
-# keys matching these names are passed straight through; ``m``/``n``/``k`` are
-# required and the subgroup/prefetch tile keys are optional (xeas derives the
-# missing ones). ``wg_m``/``wg_n``/``k_tile`` are provided separately as
-# explicit compile options and injected into this params dict.
-_XEAS_PARAM_KEYS = (
-    "m", "n", "k", "device", "transpose_a", "transpose_b",
-    "sg_m", "sg_n",
-    "load_a_m", "load_a_k", "load_b_k", "load_b_n",
-    "load_m", "load_n",
-    "prefetch_a_m", "prefetch_a_k", "prefetch_b_k", "prefetch_b_n",
-    "prefetch_a_nb", "prefetch_b_nb",
-)
 
 # Fallback launch block when the tile options needed to derive it are absent
 # (matches xeaddlauncher's own default).
@@ -165,30 +119,6 @@ def _tile_from_options(options: dict) -> tuple[int, int, int | None]:
     return int(options["wg_m"]), int(options["wg_n"]), (None if k_tile is None else int(k_tile))
 
 
-def _xeas_params(options: dict, wg_m: int, wg_n: int, k_tile: int | None) -> dict:
-    """Build ``xeas`` params from flat options and optional signature tiles."""
-    params = {k: options[k] for k in _XEAS_PARAM_KEYS if k in options}
-    if wg_m is not None and wg_n is not None:
-        params.setdefault("wg_m", wg_m)
-        params.setdefault("wg_n", wg_n)
-
-    # Elementwise schedules can be launched with only wg tiles provided.
-    # In that case xeas would otherwise inject fixed defaults (sg_n=32,
-    # load_n=16), which can violate constraints for skinny tiles such as
-    # wg_n=1. Derive compatible defaults from wg tiles unless the caller
-    # already provided explicit sg/load values.
-    is_elemwise_like = not all(k in options for k in ("m", "n", "k"))
-    if is_elemwise_like and wg_m is not None and wg_n is not None:
-        sg_m = int(params.setdefault("sg_m", min(32, wg_m)))
-        sg_n = int(params.setdefault("sg_n", min(32, wg_n)))
-        params.setdefault("load_m", min(8, sg_m))
-        params.setdefault("load_n", min(16, sg_n))
-
-    if k_tile is not None:
-        params.setdefault("k_tile", k_tile)
-    return params
-
-
 def _block(options: dict, block_threads, wg_m: int, wg_n: int) -> tuple:
     """Launch block ``((wg_m // sg_m) * (wg_n // sg_n) * 16, 1, 1)``.
     ``wg_m``/``wg_n`` are supplied from options. Falls back to
@@ -205,19 +135,12 @@ def _block(options: dict, block_threads, wg_m: int, wg_n: int) -> tuple:
     return ((wg_m // sg_m) * (wg_n // sg_n) * _NB_WORKITEMS, 1, 1)
 
 
-def _xeas_api(options: dict,
-              wg_m: int | None,
-              wg_n: int | None,
-              k_tile: int | None) -> tuple[dict, dict]:
-    """Build ``(params, kwargs)`` for xeas from flat options."""
-    params = _xeas_params(options, wg_m, wg_n, k_tile)
-    # print(options)
-    kwargs = {
-        "assume_in_bounds": options.get("assume_in_bounds", False),
+def _xeas_api(options: dict) -> dict:
+    """Build ``kwargs`` for xeas from flat options."""
+    return {
         "xegpu_op_level": options.get("xegpu_op_level", "workgroup"),
         "large_register_file": options.get("large_register_file", True),
     }
-    return params, kwargs
 
 
 def _xelaunch_api(options: dict) -> dict:
@@ -243,43 +166,6 @@ def _torch_to_ct_dtype(t):
         torch.int16: ct.int16, torch.int8: ct.int8,
         torch.uint8: ct.uint8, torch.bool: ct.int8,
     }[t]
-
-
-# Map torch dtypes to MLIR element type names, matching tileir-to-mlir output.
-def _torch_to_mlir_elem(t) -> str | None:
-    import torch
-    return {
-        torch.float32: "f32", torch.float16: "f16",
-        torch.bfloat16: "bf16", torch.float64: "f64",
-        torch.int32: "i32", torch.int64: "i64",
-        torch.int16: "i16", torch.int8: "i8",
-        torch.uint8: "i8", torch.bool: "i8",
-    }.get(t)
-
-
-def _input_shape_from_args(signature: KernelSignature, args: tuple) -> str | None:
-    """Build the xeas ``input_shape`` string from the runtime tensor arguments.
-
-    Produces one ``D0xD1x...xTYPE`` descriptor per runtime (non-constant) kernel
-    argument, in the order the outlined ``gpu.func`` receives its memref
-    arguments. Passing this lets xeas rewrite the kernel's dynamically shaped
-    memrefs to static shapes, which is required for the XeGPU block-descriptor
-    lowering to succeed. Returns ``None`` when a runtime argument is not a
-    shaped tensor (the rewrite needs a memref descriptor for every argument).
-    """
-    import torch
-    descriptors = []
-    for arg, param in zip(args, signature.parameters):
-        if isinstance(param, ConstantConstraint):
-            continue
-        if not isinstance(arg, torch.Tensor) or arg.ndim == 0:
-            return None
-        elem = _torch_to_mlir_elem(arg.dtype)
-        if elem is None:
-            return None
-        dims = "x".join(str(int(d)) for d in arg.shape)
-        descriptors.append(f"{dims}x{elem}")
-    return ",".join(descriptors) if descriptors else None
 
 
 def _array_constraint_from_torch(tensor,
@@ -368,7 +254,7 @@ def build_signature(kernel, args,
 
     constraints = []
     for i, a in enumerate(args):
-        print(f"arg {i}: {a} (type={type(a).__name__}) {'constant' if const_mask[i] else 'runtime'}")
+        # print(f"arg {i}: {a} (type={type(a).__name__}) {'constant' if const_mask[i] else 'runtime'}")
         if const_mask[i]:
             if not isinstance(a, bool | int | float):
                 raise TypeError(
@@ -423,8 +309,8 @@ def _run_tileir_to_mlir(tool: str, bytecode: bytes) -> str:
     argv = [tool,
             f"--tileir-to-mlir-pipeline=drop-rounding-modes=true known-block-size={','.join(map(str, block))} assume-in-bounds={assume_in_bounds}",
             "--convert-memref-args-to-ranked-memref=remove-unused=assumed-memref-dependent",
-            "--loop-invariant-code-motion", "-canonicalize", "-cse",
-            "--mlir-print-ir-after-all"]
+            "--loop-invariant-code-motion", "-canonicalize", "-cse",]
+            # "--mlir-print-ir-after-all"]
     try:
         proc = subprocess.run(argv, input=bytecode, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, check=False)
@@ -458,18 +344,10 @@ def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
     """
     tileir_to_mlir = _resolve_tool("CUTILE_XPU_TILEIR_TO_MLIR", "tileir-to-mlir")
     options = getattr(_tls, "options", None) or {}
-    wg_m, wg_n, k_tile = _tile_from_options(options)
-    xeas_params, xeas_kwargs = _xeas_api(options, wg_m, wg_n, k_tile)
-
-    # Rewrite the kernel's dynamic memref args to static shapes so xeas can
-    # build XeGPU block descriptors; explicit option overrides take precedence.
-    input_shape = options.get("input_shape") or getattr(_tls, "input_shape", None)
-    if input_shape:
-        xeas_kwargs["input_shape"] = input_shape
+    xeas_kwargs = _xeas_api(options)
 
     mlir = _run_tileir_to_mlir(tileir_to_mlir, tileir_bytecode)
-    # print(xeas_params, xeas_kwargs, file=sys.stderr)
-    result = xeas(mlir, xeas_params, **xeas_kwargs)
+    result = xeas(mlir, **xeas_kwargs)
     return result
 
 
@@ -522,10 +400,8 @@ def launch(stream, grid, kernel, args):
     run_kwargs = _xelaunch_api(options)
 
     sig = build_signature(kernel, args)
-    input_shape = _input_shape_from_args(sig, args)
     with _xe_context():
         _tls.grid = grid
-        _tls.input_shape = input_shape
         binary, _ = ct.compile_kernel(kernel, sig)
             
         # xelaunch only sees runtime values. Drop compile-time constants from args

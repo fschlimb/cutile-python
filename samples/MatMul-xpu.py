@@ -280,10 +280,7 @@ if __name__ == "__main__":
     K_dim = 4096
 
     device = "xpu"
-    # Keys are passed straight through to the lighthouse xe* Python APIs:
-    # the matmul params go to xeas.
     options = {
-        "input_shape": f"{M_dim}x{K_dim}xf16,{K_dim}x{N_dim}xf16,{M_dim}x{N_dim}xf32",
         "m": M_dim, "n": N_dim, "k": K_dim,
         "wg_m": 256, "wg_n": 256, "k_tile": 32,
         "transpose_a": False, "transpose_b": False,

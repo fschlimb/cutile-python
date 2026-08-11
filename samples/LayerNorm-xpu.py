@@ -204,7 +204,7 @@ class CuTileLayerNorm(torch.autograd.Function):
         mean = torch.empty((M, TILE_N), dtype=torch.float32, device=x.device)
         rstd = torch.empty((M, TILE_N), dtype=torch.float32, device=x.device)
         # Launch the forward kernel with a 1D grid (M blocks)
-        with xpu.compile_options({"wg_m": 1, "wg_n": TILE_N}):
+        with xpu.compile_options({"wg_m": 1, "wg_n": TILE_N, "block_threads": (1, 32, 16)}):
             ct.launch(torch.xpu.current_stream(), (M, 1, 1), layer_norm_fwd,
                       (x, weight, bias, y, mean, rstd, eps, TILE_N))
 
@@ -244,7 +244,7 @@ class CuTileLayerNorm(torch.autograd.Function):
         db = torch.empty((M, N), dtype=torch.float32, device=bias.device)
 
         # Launch the first backward kernel to compute dX and partial dW/dB
-        with xpu.compile_options({"wg_m": 1, "wg_n": TILE_N}):
+        with xpu.compile_options({"wg_m": 1, "wg_n": TILE_N, "block_threads": (1, 32, 16)}):
             ct.launch(torch.xpu.current_stream(), (M, 1, 1), layer_norm_bwd_dx_partial_dwdb,
                       (dx, dy, dw, db, x, weight, mean, rstd, TILE_N))
 
@@ -253,7 +253,7 @@ class CuTileLayerNorm(torch.autograd.Function):
         final_db = torch.empty((TILE_M, N), dtype=bias.dtype, device=bias.device)
 
         # Launch the second backward kernel to reduce partial dW/dB
-        with xpu.compile_options({"wg_m": TILE_M, "wg_n": TILE_N}):
+        with xpu.compile_options({"wg_m": TILE_M, "wg_n": TILE_N, "block_threads": (1, 32, 16)}):
             ct.launch(torch.xpu.current_stream(), (math.ceil(N / TILE_N), 1, 1), layer_norm_bwd_dwdb,
                       (dw, db, final_dw, final_db, TILE_M, TILE_N))
 
