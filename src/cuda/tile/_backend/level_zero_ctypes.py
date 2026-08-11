@@ -304,10 +304,10 @@ def launch_level_zero_kernel(
         created_stream = True
     stream = _require_handle(stream, "mgpuStreamCreate")
 
+    # The `*_storages` lists own the ctypes buffers the pointers refer to; they
+    # must stay referenced until mgpuLaunchKernel has read their addresses.
     input_storages, input_pointers = _prepare_kernel_arguments(input_arguments)
     output_storages, output_pointers = _prepare_kernel_arguments(output_arguments)
-    # Keep ctypes fields alive until mgpuLaunchKernel has read their addresses.
-    _kernel_argument_storages = [*input_storages, *output_storages]
 
     arg_values = [*input_pointers, *output_pointers]
     kernel_args = None

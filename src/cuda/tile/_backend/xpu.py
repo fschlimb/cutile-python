@@ -1,9 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) <2026> NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+"""cuTile backend targeting Intel XPUs through XeGPU and Level Zero.
+
+Compilation runs the native ``tileir-to-mlir`` tool followed by the XeVM
+pipeline (:mod:`cuda.tile._backend.xeas`); the resulting device binary is
+launched through :mod:`cuda.tile._backend.level_zero_ctypes`.
+
+Select the backend and supply the mandatory tuning parameters::
+
+    ct.set_backend("xpu")
+    with xpu.compile_options({"wg_m": 128, "wg_n": 128}):
+        ct.launch(stream, grid, matmul_kernel, args)
+
+The Level Zero runtime wrapper library is located through ``LZ_RT_LIB_PATH``.
+"""
 import os
 import sys
 import shutil
 import subprocess
 import contextlib
-import tempfile
 import threading
 
 import numpy as np
@@ -17,44 +33,54 @@ from cuda.tile.compilation import (
 from mlir import ir
 
 from .xeas import xeas
-from .xelaunch import xelaunch
+from .level_zero_ctypes import launch_level_zero_module_kernel
 
-# Target string reported to the compiler. Setting this here makes
-# `get_sm_arch_override()` short-circuit so cuTile never probes a CUDA device
-# (which would dlopen libcuda) when this backend is active.
-# We need an integer, provide a somewhat random mapping from identifiers to ints
-def get_sm_arch_xpu(arch: str) -> int:
-    _xpus = {"b70": "1070",
-             "b50": "1050",
-             "pvc": "2000",
-             }
-    return _xpus.get(arch, 0)
+# cuTile identifies a compile target by an `sm_<number>` style string. Xe
+# devices have no such number, so each supported device gets a distinct value
+# that cannot collide with a real SM.
+_ARCH_IDS = {
+    "b70": "1070",
+    "b50": "1050",
+    "pvc": "2000",
+}
+_DEFAULT_ARCH = "b70"
 
-sm_arch = get_sm_arch_xpu("b70")
+
+def _arch_id(arch: str) -> str:
+    if arch not in _ARCH_IDS:
+        raise ValueError(
+            f"XPU backend: unknown architecture {arch!r}; expected one of "
+            f"{', '.join(sorted(_ARCH_IDS))}.")
+    return _ARCH_IDS[arch]
+
+
+# Reporting a target here makes `get_sm_arch_override()` short-circuit, so
+# cuTile never probes a CUDA device (which would dlopen libcuda) when this
+# backend is active.
+sm_arch = _arch_id(os.environ.get("CUTILE_XPU_ARCH", _DEFAULT_ARCH))
 
 # Pin the TileIR bytecode version so cuTile does not probe the `tileiras`
 # compiler (which requires a CUDA toolkit) to auto-detect it.
 bytecode_version = "13.3"
 
-# Host launcher / entry function name shared by the compile stages and xelaunch.
-_ENTRY_POINT = "payload"
-_BENCH_NAME = "benchmark"
-
 # Single process-wide MLIR context, created once and reused by every launch.
+_context_lock = threading.Lock()
 _mlir_context = None
 
 
 def _xe_context():
     """Return the shared MLIR context, creating it on first use."""
     global _mlir_context
-    if _mlir_context is None:
-        _mlir_context = ir.Context()
+    with _context_lock:
+        if _mlir_context is None:
+            _mlir_context = ir.Context()
     return _mlir_context
 
 
-_DIVISOR_16 = 16
-_BYTE_BITWIDTH = 8
-_NB_WORKITEMS = 16
+_ALIGN_BYTES = 16
+_SHAPE_DIVISOR = 16
+_BITS_PER_BYTE = 8
+_SUBGROUP_SIZE = 16
 
 # Per-launch compiler options. `compile_options(...)` sets extra values passed
 # to the launcher, scoped to the enclosing `ct.launch` call (it runs on the
@@ -71,8 +97,8 @@ def compile_options(options: dict):
     launch block.
 
     The work-group tiles ``wg_m``/``wg_n`` must be set explicitly in
-    ``options``. Combined with ``sg_m``/``sg_n`` and a fixed ``nb_workitems=16``
-    they derive the launch block
+    ``options``. Combined with ``sg_m``/``sg_n`` and the fixed subgroup size of
+    16 they derive the launch block
     ``((wg_m // sg_m) * (wg_n // sg_n) * 16, 1, 1)``.
 
         Accepted options:
@@ -82,7 +108,6 @@ def compile_options(options: dict):
         =================== ========== ========================== ==========================
         block_threads       all        optional                   launch block (overrides derived)
         wg_m, wg_n          all        yes                        work-group tile sizes
-        k_tile              matmul     optional                   reduction tile size
         sg_m, sg_n          all        optional                   subgroup tile size
         assume_in_bounds    all        optional                   mark transfers in-bounds
         xegpu_op_level      all        optional                   initial XeGPU op level
@@ -102,81 +127,97 @@ def compile_options(options: dict):
         _tls.options = prev
 
 
-# Fallback launch block when the tile options needed to derive it are absent
-# (matches xeaddlauncher's own default).
+def _current_options() -> dict:
+    """Options of the innermost enclosing :func:`compile_options` block."""
+    return getattr(_tls, "options", None) or {}
+
+
+# Launch block used when no subgroup tile sizes are given.
 _DEFAULT_BLOCK = (512, 1, 1)
 
 
-def _tile_from_options(options: dict) -> tuple[int, int, int | None]:
-    """Read required work-group tiles and optional reduction tile from options."""
+def _workgroup_tiles(options: dict) -> tuple[int, int]:
+    """Read the mandatory work-group tile sizes from options."""
     missing = [k for k in ("wg_m", "wg_n") if k not in options]
     if missing:
         raise ValueError(
             "XPU backend: missing required compile_options keys: "
             f"{', '.join(missing)}"
         )
-    k_tile = options.get("k_tile")
-    return int(options["wg_m"]), int(options["wg_n"]), (None if k_tile is None else int(k_tile))
+    return int(options["wg_m"]), int(options["wg_n"])
 
 
-def _block(options: dict, block_threads, wg_m: int, wg_n: int) -> tuple:
-    """Launch block ``((wg_m // sg_m) * (wg_n // sg_n) * 16, 1, 1)``.
-    ``wg_m``/``wg_n`` are supplied from options. Falls back to
-    :data:`_DEFAULT_BLOCK` unless ``sg_m``/``sg_n`` are both provided.
+def _launch_block(options: dict) -> tuple:
+    """Derive the launch block ``((wg_m // sg_m) * (wg_n // sg_n) * 16, 1, 1)``.
+
+    ``block_threads`` overrides the derived value; without ``sg_m``/``sg_n``
+    there is nothing to derive from and :data:`_DEFAULT_BLOCK` applies.
     """
+    wg_m, wg_n = _workgroup_tiles(options)
+    block_threads = options.get("block_threads")
     if block_threads is not None:
         return block_threads
-    if wg_m is None or wg_n is None:
+    if "sg_m" not in options or "sg_n" not in options:
         return _DEFAULT_BLOCK
-    keys = ("sg_m", "sg_n")
-    if not all(k in options for k in keys):
-        return _DEFAULT_BLOCK
-    sg_m, sg_n = (options[k] for k in keys)
-    return ((wg_m // sg_m) * (wg_n // sg_n) * _NB_WORKITEMS, 1, 1)
+    sg_m, sg_n = options["sg_m"], options["sg_n"]
+    return ((wg_m // sg_m) * (wg_n // sg_n) * _SUBGROUP_SIZE, 1, 1)
 
 
-def _xeas_api(options: dict) -> dict:
-    """Build ``kwargs`` for xeas from flat options."""
+def _xeas_options(options: dict) -> dict:
+    """Build the :func:`~cuda.tile._backend.xeas.xeas` keyword arguments."""
     return {
         "xegpu_op_level": options.get("xegpu_op_level", "workgroup"),
         "large_register_file": options.get("large_register_file", True),
     }
 
 
-def _xelaunch_api(options: dict) -> dict:
-    """Build ``kwargs`` for xelaunch from flat options."""
-    zpath = os.environ.get("LZ_RT_LIB_PATH", None)
-    assert zpath is not None, "XPU backend: LZ_RT_LIB_PATH must be set to your libmlir_levelzero_runtime.so"
-    kwargs = {
-        # "flops": options.get("flops", None),
-        # "nwarmup": options.get("nwarmup", 500),
-        # "nruns": options.get("nruns", 1000),
-        "library_path": zpath,
-    }
-    return kwargs
+def _runtime_library_path() -> str:
+    """Path to the Level Zero runtime wrapper library."""
+    path = os.environ.get("LZ_RT_LIB_PATH")
+    if path is None:
+        raise RuntimeError(
+            "XPU backend: LZ_RT_LIB_PATH must be set to your "
+            "libmlir_levelzero_runtime.so")
+    return path
 
 
-# Map torch dtypes to cuTile DTypes. Extend as needed.
-def _torch_to_ct_dtype(t):
-    import torch
-    return {
-        torch.float32: ct.float32, torch.float16: ct.float16,
-        torch.bfloat16: ct.bfloat16, torch.float64: ct.float64,
-        torch.int32: ct.int32, torch.int64: ct.int64,
-        torch.int16: ct.int16, torch.int8: ct.int8,
-        torch.uint8: ct.uint8, torch.bool: ct.int8,
-    }[t]
+_torch = None
+_TORCH_TO_CT_DTYPE: dict = {}
+
+
+def _torch_api():
+    """Import torch on first use; only tensor arguments need it."""
+    global _torch
+    if _torch is None:
+        import torch
+        _TORCH_TO_CT_DTYPE.update({
+            torch.float32: ct.float32, torch.float16: ct.float16,
+            torch.bfloat16: ct.bfloat16, torch.float64: ct.float64,
+            torch.int32: ct.int32, torch.int64: ct.int64,
+            torch.int16: ct.int16, torch.int8: ct.int8,
+            torch.uint8: ct.uint8, torch.bool: ct.int8,
+        })
+        _torch = torch
+    return _torch
+
+
+def _torch_to_ct_dtype(dtype):
+    _torch_api()
+    try:
+        return _TORCH_TO_CT_DTYPE[dtype]
+    except KeyError:
+        raise TypeError(
+            f"XPU backend: unsupported tensor dtype {dtype}") from None
 
 
 def _array_constraint_from_torch(tensor,
                                  *,
                                  index_dtype,
-                                 base_addr_divisible_by,
-                                 alias_group=None) -> ArrayConstraint:
+                                 base_addr_divisible_by) -> ArrayConstraint:
     # cuTile assumes a dense, C-contiguous layout for the pointer it receives.
     if not tensor.is_contiguous():
         raise ValueError(
-            f"Expected a contiguous tensor (shape={tuple(tensor.shape)}, "
+            f"XPU backend: expected a contiguous tensor (shape={tuple(tensor.shape)}, "
             f"strides={tuple(tensor.stride())}); call .contiguous() before launch."
         )
 
@@ -191,18 +232,20 @@ def _array_constraint_from_torch(tensor,
         for i, (d, s) in enumerate(zip(shape, strides)):
             if d > i32_max or s > i32_max:
                 raise TypeError(
-                    f"shape={shape} dim {i} (size={d}, stride={s}) exceeds int32 "
-                    f"index range; annotate the parameter with ct.int64 index dtype."
+                    f"XPU backend: shape={shape} dim {i} (size={d}, stride={s}) exceeds "
+                    f"int32 index range; annotate the parameter with ct.int64 index dtype."
                 )
 
-    div16_bits = _DIVISOR_16 * _BYTE_BITWIDTH
-    stride_divisor = div16_bits // bits if div16_bits % bits == 0 else 1
+    # The alignment guarantee is in bytes; it only translates into an element
+    # count when the element size divides it evenly.
+    align_bits = _ALIGN_BYTES * _BITS_PER_BYTE
+    stride_divisor = align_bits // bits if align_bits % bits == 0 else 1
 
     stride_constant, stride_divisible_by, shape_divisible_by = [], [], []
     for i in range(ndim):
         s, d = strides[i], shape[i]
         stride_constant.append(1 if s == 1 else None)
-        shape_divisible_by.append(_DIVISOR_16 if d % _DIVISOR_16 == 0 else 1)
+        shape_divisible_by.append(_SHAPE_DIVISOR if d % _SHAPE_DIVISOR == 0 else 1)
         stride_divisible_by.append(stride_divisor if s % stride_divisor == 0 else 1)
 
     return ArrayConstraint(
@@ -210,7 +253,7 @@ def _array_constraint_from_torch(tensor,
         ndim=ndim,
         index_dtype=index_dtype,
         stride_lower_bound_incl=0,
-        alias_groups=() if alias_group is None else (alias_group,),
+        alias_groups=(),
         may_alias_internally=False,
         stride_constant=tuple(stride_constant),
         stride_divisible_by=tuple(stride_divisible_by),
@@ -226,7 +269,7 @@ def _scalar_constraint(value, *, int64) -> ScalarConstraint:
         return ScalarConstraint(ct.int64 if int64 else ct.int32)
     if isinstance(value, float):
         return ScalarConstraint(ct.float32)
-    raise TypeError(f"Unsupported scalar type: {type(value).__name__}")
+    raise TypeError(f"XPU backend: unsupported scalar type: {type(value).__name__}")
 
 
 def build_signature(kernel, args,
@@ -240,7 +283,7 @@ def build_signature(kernel, args,
     Constant / scalar / array classification is driven by the kernel's own
     parameter annotations, not by guessing from Python types.
     """
-    import torch
+    torch = _torch_api()
     cc = calling_convention or CallingConvention.cutile_python_v1()
 
     af = kernel._annotated_function
@@ -250,15 +293,14 @@ def build_signature(kernel, args,
 
     n = len(const_mask)
     if len(args) != n:
-        raise TypeError(f"kernel expects {n} arguments, got {len(args)}")
+        raise TypeError(f"XPU backend: kernel expects {n} arguments, got {len(args)}")
 
     constraints = []
     for i, a in enumerate(args):
-        # print(f"arg {i}: {a} (type={type(a).__name__}) {'constant' if const_mask[i] else 'runtime'}")
         if const_mask[i]:
             if not isinstance(a, bool | int | float):
                 raise TypeError(
-                    f"constant parameter #{i} must be bool/int/float, "
+                    f"XPU backend: constant parameter #{i} must be bool/int/float, "
                     f"got {type(a).__name__}")
             constraints.append(ConstantConstraint(a))
         elif isinstance(a, torch.Tensor):
@@ -274,6 +316,7 @@ def build_signature(kernel, args,
     if symbol is None:
         sig = sig.with_mangled_symbol(af.pyfunc.__name__)
     return sig
+
 
 def _resolve_tool(env_var: str, default_name: str) -> str:
     """Resolve a toolchain executable.
@@ -294,23 +337,18 @@ def _resolve_tool(env_var: str, default_name: str) -> str:
         f"XPU backend: could not find '{default_name}' via {hint}.")
 
 
-def _run_tileir_to_mlir(tool: str, bytecode: bytes) -> str:
+def _run_tileir_to_mlir(tool: str, bytecode: bytes, options: dict) -> str:
     """Lower TileIR bytecode to 'outlined' MLIR text via the tileir-to-mlir CLI.
 
-    This stage is a native tool (not a lighthouse Python module), so it is still
-    run as a subprocess. Raises ``RuntimeError`` with the captured stderr on
-    failure.
+    Raises ``RuntimeError`` with the captured stderr on failure. Set
+    ``CUTILE_XPU_DUMP_MLIR`` to mirror the produced MLIR to stderr.
     """
-    options = getattr(_tls, "options", None) or {}
-    block_threads = options.get("block_threads")
-    wg_m, wg_n, _ = _tile_from_options(options)
-    block = _block(options, block_threads, wg_m, wg_n)
+    block = _launch_block(options)
     assume_in_bounds = str(options.get("assume_in_bounds", False)).lower()
     argv = [tool,
             f"--tileir-to-mlir-pipeline=drop-rounding-modes=true known-block-size={','.join(map(str, block))} assume-in-bounds={assume_in_bounds}",
             "--convert-memref-args-to-ranked-memref=remove-unused=assumed-memref-dependent",
-            "--loop-invariant-code-motion", "-canonicalize", "-cse",]
-            # "--mlir-print-ir-after-all"]
+            "--loop-invariant-code-motion", "-canonicalize", "-cse"]
     try:
         proc = subprocess.run(argv, input=bytecode, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, check=False)
@@ -330,36 +368,42 @@ def _run_tileir_to_mlir(tool: str, bytecode: bytes) -> str:
     if proc.stderr:
         sys.stderr.write(proc.stderr.decode(errors="replace"))
         sys.stderr.flush()
-    print(proc.stdout.decode())
-    return proc.stdout.decode()
+
+    mlir = proc.stdout.decode(errors="replace")
+    if os.environ.get("CUTILE_XPU_DUMP_MLIR"):
+        sys.stderr.write(mlir)
+        sys.stderr.flush()
+    return mlir
 
 
 def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
-    """Compile TileIR bytecode to an XPU shared library via the XeGPU toolchain.
+    """Compile TileIR bytecode into an Xe device binary blob.
 
-    Runs two stages:
-        tileir-to-mlir (CLI) -> xeas (Python)
-
-    The native tileir-to-mlir tool can be overridden with ``CUTILE_XPU_TILEIR_TO_MLIR``.
+    Runs the native tileir-to-mlir tool (overridable with
+    ``CUTILE_XPU_TILEIR_TO_MLIR``) followed by the XeVM pipeline in
+    :func:`~cuda.tile._backend.xeas.xeas`.
     """
-    tileir_to_mlir = _resolve_tool("CUTILE_XPU_TILEIR_TO_MLIR", "tileir-to-mlir")
-    options = getattr(_tls, "options", None) or {}
-    xeas_kwargs = _xeas_api(options)
+    # symbol/sm_arch/signature are part of the backend hook protocol; the Xe
+    # toolchain derives everything it needs from the bytecode itself.
+    tool = _resolve_tool("CUTILE_XPU_TILEIR_TO_MLIR", "tileir-to-mlir")
+    options = _current_options()
+    mlir = _run_tileir_to_mlir(tool, tileir_bytecode, options)
+    return xeas(mlir, **_xeas_options(options))
 
-    mlir = _run_tileir_to_mlir(tileir_to_mlir, tileir_bytecode)
-    result = xeas(mlir, **xeas_kwargs)
-    return result
+
+# ABI type of a runtime scalar, keyed by its signature dtype.
+_SCALAR_NUMPY_DTYPE = {
+    ct.int8: np.int8, ct.int16: np.int16,
+    ct.int32: np.int32, ct.int64: np.int64,
+    ct.uint8: np.uint8, ct.uint16: np.uint16,
+    ct.uint32: np.uint32, ct.uint64: np.uint64,
+    ct.float32: np.float32, ct.float64: np.float64,
+}
 
 
 def _scalar_arg(value, constraint: ScalarConstraint):
     """Convert a runtime scalar to the NumPy value matching its ABI type."""
-    dtype = {
-        ct.int8: np.int8, ct.int16: np.int16,
-        ct.int32: np.int32, ct.int64: np.int64,
-        ct.uint8: np.uint8, ct.uint16: np.uint16,
-        ct.uint32: np.uint32, ct.uint64: np.uint64,
-        ct.float32: np.float32, ct.float64: np.float64,
-    }.get(constraint.dtype)
+    dtype = _SCALAR_NUMPY_DTYPE.get(constraint.dtype)
     if dtype is None:
         raise TypeError(f"XPU backend: unsupported scalar dtype {constraint.dtype}")
     return dtype(value)
@@ -369,11 +413,10 @@ def _runtime_kernel_args(signature: KernelSignature, args: tuple) -> list:
     """Build the kernel argument list expected by the Xe kernel.
 
     Compile-time constants are dropped (they are baked into the binary), tensors
-    are forwarded as-is (``xelaunch`` expands them into memref descriptors) and
-    scalars become NumPy values carrying their signature dtype (``xelaunch``
-    converts both to the kernel ABI).
+    are forwarded as-is (the Level Zero launcher expands them into memref
+    descriptors) and scalars become NumPy values carrying their signature dtype.
     """
-    import torch
+    torch = _torch_api()
     flat = []
     for arg, param in zip(args, signature.parameters):
         if isinstance(param, ConstantConstraint):
@@ -389,34 +432,30 @@ def _runtime_kernel_args(signature: KernelSignature, args: tuple) -> list:
 
 
 def launch(stream, grid, kernel, args):
-    """Compile and launch kernel on the XPU.
+    """Compile and synchronously launch a kernel on the XPU.
 
-    Compiles the kernel to a shared library, writes it to a temporary file and
-    hands it to the ``xelaunch`` Python API together with the runtime tensor
-    arguments (compile-time constants removed), which loads the library and runs
-    the entry function once.
+    Compilation goes through :func:`compile_tileir`; the resulting device binary
+    is loaded and run by the Level Zero runtime with the runtime arguments only
+    (compile-time constants are baked into the binary).
     """
-    options = getattr(_tls, "options", None) or {}
-    run_kwargs = _xelaunch_api(options)
+    options = _current_options()
+    library_path = _runtime_library_path()
+    block = _launch_block(options)
 
     sig = build_signature(kernel, args)
     with _xe_context():
-        _tls.grid = grid
         binary, _ = ct.compile_kernel(kernel, sig)
-            
-        # xelaunch only sees runtime values. Drop compile-time constants from args
-        # and expand tensors into the memref descriptors the kernel ABI expects.
-        runtime_args = _runtime_kernel_args(sig, args)
 
-        # The Level Zero runtime behind xelaunch enqueues onto its own immediate
-        # command list, which is unordered with respect to ``stream``. Drain the
-        # caller's pending work (e.g. the tensor initialisation) first, otherwise
-        # it can land after the kernel and overwrite its results. xelaunch blocks
-        # until the kernel completed, so ordering is restored on the way out.
-        if stream is not None and hasattr(stream, "synchronize"):
-            stream.synchronize()
+    runtime_args = _runtime_kernel_args(sig, args)
 
-        block_threads = options.get("block_threads")
-        wg_m, wg_n, _ = _tile_from_options(options)
-        block = _block(options, block_threads, wg_m, wg_n)
-        xelaunch(binary, sig.symbol, runtime_args, grid, block, **run_kwargs)
+    # The Level Zero runtime enqueues onto its own immediate command list, which
+    # is unordered with respect to ``stream``. Drain the caller's pending work
+    # (e.g. the tensor initialisation) first, otherwise it can land after the
+    # kernel and overwrite its results. The launch below blocks until the kernel
+    # completed, so ordering is restored on the way out.
+    if stream is not None:
+        stream.synchronize()
+
+    launch_level_zero_module_kernel(
+        binary, sig.symbol, runtime_args, [], grid, block,
+        library_path=library_path)
