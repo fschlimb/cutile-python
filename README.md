@@ -83,8 +83,7 @@ How to adapt an existing cuTile program
    `block_threads`).
 4. Respect the XPU schedule's tile-alignment requirements. Validate the input dimensions before
    launch, and reshape or pad inputs when the selected tile sizes require it.
-5. Replace algorithms that use CAS spin loops or lock-based atomic accumulation. The LayerNorm
-   example keeps one partial result per row and reduces those results in a separate kernel.
+5. Work around uses of CAS spin loops or lock-based atomic accumulation.
 
 Notes
 -----
