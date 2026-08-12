@@ -8,6 +8,97 @@ cuTile Python is a programming language for NVIDIA GPUs. The official documentat
 on [docs.nvidia.com](https://docs.nvidia.com/cuda/cutile-python),
 or built from source located in the [docs](docs/) folder.
 
+--------------------------------------------------------
+--------------------------------------------------------
+XPU Backend (uv)
+================
+The experimental XPU backend targets Intel GPUs and requires
+[tileir-to-mlir](https://github.com/intel-sandbox/users.fschlimb.CudaTileToGPU)
+and needs access to the MLIR install that was used to build it.
+Before anything else, follow the instructions there to build `tileir-to-mlir`.
+Note: when building LLVM/MLIR
+  - use the latest compatible version of LLVM to get most recent support for Xe
+  - enable the Python bindings (use `-DMLIR_ENABLE_BINDINGS_PYTHON=1`)
+
+The XPU backend also needs NumPy.
+
+Here are the instruction to install and use it:
+
+Building/installing
+-------------------
+
+1. Login to a node which has a CUDA device
+2. Setup CUDA environment (cuda dev kit)
+3. Setup XPU environment
+   ```
+   . /swtools/intel/setvars.sh
+   . /swtools/intel-gpu/latest/intel_gpu_vars.sh
+   ```
+4. Install `uv` (see the [installation guide](https://docs.astral.sh/uv/getting-started/installation/)).
+5. Create the virtual environment in the source root:
+   ```
+   uv venv
+   ```
+6. Install cuTile in editable mode together with the XPU dependencies:
+   ```
+   uv sync --extra xpu
+   ```
+   This creates `.venv`, builds the C++ extension, and installs `numpy`.
+
+Running on XPU
+--------------
+
+0. Login to a node which has an XPU device
+1. Setup XPU environment
+   ```
+   . /swtools/intel/setvars.sh --force
+   . /swtools/intel-gpu/latest/intel_gpu_vars.sh
+   ```
+   The Intel GPU tools (e.g. `ocloc`) should now be on `PATH`.
+2. Activate the environment and etup environment variables to `tileir-to-mlir` and point the MLIR Level Zero runtime wrappe:
+   ```
+   source .venv/bin/activate
+   export CUTILE_XPU_TILEIR_TO_MLIR=path/to/tileir-to-mlir
+   export LZ_RT_LIB_PATH=/path/to/libze_loader.so
+   ```
+3. You also need the Python bindings of the MLIR install that was used to build `tileir-to-mlir`
+   ```
+   PYTHONPATH=path/to/tileir-to-mlirs_mlir-installation/python_packages/mlir_core/
+4. Run an example
+   ```
+   python -u samples/MatMul-xpu.py --correctness-check
+   ```
+   Optional environment variables: `CUTILE_XPU_ARCH` selects the target architecture,
+   `CUTILE_XPU_DUMP_MLIR` dumps the generated MLIR.
+
+How to adapt an existing cuTile program
+---------------------------------------
+
+1. Import `xpu` with `from cuda.tile._backend import xpu` and select it with
+   `ct.set_backend("xpu")`.
+2. Use XPU tensors and streams: replace `tensor.is_cuda` with `tensor.is_xpu`, and
+   `torch.cuda.current_stream()` with `torch.xpu.current_stream()`.
+3. Remove CUDA-specific kernel hints such as `occupancy` and `num_ctas`. Wrap each launch in
+   `xpu.compile_options(...)`, providing the workgroup shape (`wg_m`, `wg_n`, and
+   `block_threads`).
+4. Respect the XPU schedule's tile-alignment requirements. Validate the input dimensions before
+   launch, and reshape or pad inputs when the selected tile sizes require it.
+5. Replace algorithms that use CAS spin loops or lock-based atomic accumulation. The LayerNorm
+   example keeps one partial result per row and reduces those results in a separate kernel.
+
+Notes
+-----
+This is an experimental extension. The implementation is not complete and you should not
+expect good performance when running the kernels. At this point it is merely a POC for running
+cutile/tileir on XPU. Getting good performance requires a more sophisticated compiler pipeline
+in MLIR and some changes to the cutile code as well to optimize block sizes and such.
+Due to limitations in the upstream MLIR lowering to Xe HW some of the ported examples don't
+even compile yet or produce incorrect results.
+
+End of XPU backend
+
+--------------------------------------------------------
+--------------------------------------------------------
 
 Example
 -------

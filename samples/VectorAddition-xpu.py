@@ -172,12 +172,11 @@ def vec_add_kernel_2d_gather(
 
 
 # --- Wrapper Function to Dispatch to Kernels ---
-def _build_options(base: dict, *, wg_m: int, wg_n: int, flops: int) -> dict:
+def _build_options(base: dict, *, wg_m: int, wg_n: int) -> dict:
     opts = dict(base or {})
     # Explicit work-group tiles are required by the backend.
     opts["wg_m"] = wg_m
     opts["wg_n"] = wg_n
-    opts["flops"] = flops
     return opts
 
 
@@ -254,7 +253,6 @@ def vec_add(a: torch.Tensor, b: torch.Tensor, options: dict | None = None, use_g
             options,
             wg_m=TILE_X,
             wg_n=TILE_Y,
-            flops=N,
         )
         with xpu.compile_options(launch_options):
             ct.launch(torch.xpu.current_stream(), grid, kernel, (a2, b2, c2, TILE_X, TILE_Y))
@@ -281,7 +279,6 @@ def vec_add(a: torch.Tensor, b: torch.Tensor, options: dict | None = None, use_g
             options,
             wg_m=TILE_X,
             wg_n=TILE_Y,
-            flops=M * N,
         )
         with xpu.compile_options(launch_options):
             ct.launch(torch.xpu.current_stream(), grid, kernel, (a, b, c, TILE_X, TILE_Y))

@@ -201,17 +201,11 @@ def cutile_fmha(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor,
     grid = (grid_x, grid_y, 1)
 
     # --- Build XPU compile options ---
-    # The work-group tiles wg_m/wg_n are required by the backend. Because the
-    # payload contains DPAS (ct.mma), xeas also requires explicit matmul sizes
-    # m/n/k; we describe the QK^T matmul (TILE_M x TILE_N reducing over D_k).
+    # The work-group tiles and block dimensions are required by the backend.
     launch_options = {
         "wg_m": tile_m,
         "wg_n": tile_n,
-        "m": tile_m,
-        "n": tile_n,
-        "k": D_k,
         "block_threads": (1, 32, 16),
-        "flops": 2 * Batch * Heads * SeqLen_Q * SeqLen_KV * (D_k + D_v),
         "assume_in_bounds": True,
         **(options or {}),
     }

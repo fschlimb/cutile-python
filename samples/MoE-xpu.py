@@ -366,18 +366,12 @@ def invoke_fused_moe_kernel(
     C = C.view(-1, C.shape[2])
 
     # --- Build XPU compile options ---
-    # The work-group tiles wg_m/wg_n are required by the backend. Because the
-    # payload contains DPAS (ct.mma), xeas also requires explicit matmul sizes
-    # m/n/k; we describe the per-block tile (TILE_M x TILE_N reducing over TILE_K).
+    # The XPU backend derives the launch block from work-group and subgroup tiles.
     launch_options = {
         "wg_m": tile_m,
         "wg_n": tile_n,
         "sg_m": tile_m,
         "sg_n": tile_n,
-        "m": tile_m,
-        "n": tile_n,
-        "k": tile_k,
-        "flops": 2 * m * n * B.shape[2],
         **(options or {}),
     }
 

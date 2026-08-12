@@ -281,11 +281,8 @@ if __name__ == "__main__":
 
     device = "xpu"
     options = {
-        "m": M_dim, "n": N_dim, "k": K_dim,
-        "wg_m": 256, "wg_n": 256, "k_tile": 32,
-        "transpose_a": False, "transpose_b": False,
+        "wg_m": 256, "wg_n": 256,
         "sg_m": 64, "sg_n": 32,
-        "flops": 2 * M_dim * N_dim * K_dim,
     }
     atol, rtol = 1e-2, 1e-2
 
