@@ -1,0 +1,3 @@
+[submodule "tileir-to-mlir"]
+	path = tileir-to-mlir
+	url = https://github.com/intel-sandbox/users.fschlimb.CudaTileToGPU.git

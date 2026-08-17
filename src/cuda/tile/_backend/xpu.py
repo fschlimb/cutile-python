@@ -16,7 +16,6 @@ Select the backend and supply the mandatory tuning parameters::
 The Level Zero runtime wrapper library is located through ``LZ_RT_LIB_PATH``.
 """
 import os
-import sys
 import shutil
 import subprocess
 import contextlib
@@ -30,7 +29,18 @@ from cuda.tile.compilation import (
     ArrayConstraint, ScalarConstraint, ConstantConstraint,
 )
 
-from mlir import ir
+
+def _build_tree_dir() -> str:
+    """Directory holding the CMake build tree of this checkout."""
+    override = os.environ.get("CUDA_TILE_CEXT_BUILD_DIR")
+    if override:
+        return override
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), *[os.pardir] * 4))
+    return os.path.join(repo_root, "build")
+
+
+from mlir import ir  # noqa: E402
 
 from .xeas import xeas
 from .level_zero_ctypes import launch_level_zero_module_kernel
@@ -332,6 +342,10 @@ def _resolve_tool(env_var: str, default_name: str) -> str:
     # Allow an explicit path that shutil.which() may miss (e.g. not on PATH).
     if override and os.path.isfile(override) and os.access(override, os.X_OK):
         return override
+    if not override:
+        in_tree = os.path.join(_build_tree_dir(), "llvm", "bin", default_name)
+        if os.access(in_tree, os.X_OK):
+            return in_tree
     hint = f"{env_var}={override!r}" if override else f"$PATH (or set {env_var})"
     raise FileNotFoundError(
         f"XPU backend: could not find '{default_name}' via {hint}.")

@@ -6,10 +6,12 @@ from setuptools import setup
 from setuptools.command.build_ext import build_ext
 from setuptools.extension import Extension
 import os
+import shlex
+import shutil
 import sys
 
 
-project_root = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.realpath(__file__))
 is_windows = sys.platform == "win32"
 
 
@@ -27,24 +29,49 @@ class BuildExtWithCmake(build_ext):
     def finalize_options(self):
         super().finalize_options()
 
-    def _make(self, build_dir: str, build_type: str, parallel: int):
+    def _cmake_executable(self, build_dir: str) -> str:
+        cache_path = os.path.join(build_dir, "CMakeCache.txt")
+        if os.path.isfile(cache_path):
+            with open(cache_path, encoding="utf-8") as cache_file:
+                for line in cache_file:
+                    if line.startswith("CMAKE_COMMAND:INTERNAL="):
+                        cached_cmake = line.partition("=")[2]
+                        if os.path.isfile(cached_cmake):
+                            return cached_cmake
+
+        isolated_prefix = os.path.realpath(sys.prefix)
+        for directory in os.get_exec_path():
+            candidate = os.path.join(directory, "cmake")
+            if (os.path.isfile(candidate) and os.access(candidate, os.X_OK)
+                    and os.path.commonpath((os.path.realpath(candidate), isolated_prefix))
+                    != isolated_prefix):
+                return candidate
+        return shutil.which("cmake") or "cmake"
+
+    def _make(self, cmake_executable: str, build_dir: str, build_type: str,
+              parallel: int):
         if is_windows:
             self.spawn(["msbuild", f"{build_dir}/cuda-tile-python.sln",
                         f"-maxcpucount:{parallel}",
                         f"/p:Configuration={build_type}",
                         "/t:_cext"])
         else:
-            self.spawn(["cmake", "--build", build_dir, "--parallel", str(parallel)])
+            self.spawn([cmake_executable, "--build", build_dir,
+                        "--parallel", str(parallel)])
         # TODO: ideally, we should "make install" the library somewhere, so that CMake removes
         #   any build RPATHs etc. But I'll leave that for another day.
 
-    def _cmake(self, build_dir: str, build_type: str, dlpack_path: str, xla_path: str):
-        cmake_cmd = ["cmake", "-B", build_dir, project_root,
+    def _cmake(self, cmake_executable: str, build_dir: str, build_type: str,
+               dlpack_path: str, xla_path: str):
+        cmake_cmd = [cmake_executable, "-B", build_dir, project_root,
                      f"-DDLPACK_PATH={dlpack_path}",
                      f"-DXLA_PATH={xla_path}",
                      f"-DCMAKE_BUILD_TYPE={build_type}",
                      f"-DPython_EXECUTABLE={sys.executable}",
                      "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"]
+        if not os.path.exists(os.path.join(build_dir, "CMakeCache.txt")):
+            cmake_cmd.extend(["-G", "Ninja"])
+        cmake_cmd.extend(shlex.split(os.environ.get("CMAKE_ARGS", "")))
         if self.disable_internal:
             cmake_cmd.append("-DDISABLE_INTERNAL=1")
         if self.enable_dev_features:
@@ -62,9 +89,10 @@ class BuildExtWithCmake(build_ext):
         build_type = "Debug" if self.debug else "Release"
         dlpack_path = os.getenv("CUDA_TILE_CMAKE_DLPACK_PATH", "")
         xla_path = os.getenv("CUDA_TILE_CMAKE_XLA_PATH", "")
-        parallel = 1 if self.parallel is None else self.parallel
-        self._cmake(build_dir, build_type, dlpack_path, xla_path)
-        self._make(build_dir, build_type, parallel)
+        parallel = (os.cpu_count() or 1) if self.parallel is None else self.parallel
+        cmake_executable = self._cmake_executable(build_dir)
+        self._cmake(cmake_executable, build_dir, build_type, dlpack_path, xla_path)
+        self._make(cmake_executable, build_dir, build_type, parallel)
 
         for ext in self.extensions:
             src_dir = _get_csrc_dir(ext.name)

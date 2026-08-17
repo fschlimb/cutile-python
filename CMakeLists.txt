@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.20)
 project(cuda-tile-python)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
@@ -12,6 +12,8 @@ if (MSVC)
 else()
     set(CMAKE_CXX_STANDARD 17)
 endif()
+
+include(cmake/TileIRToMLIR.cmake)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -94,6 +96,16 @@ include(cmake/FetchXLAHeaders.cmake)
 fetch_xla_headers()
 
 add_subdirectory(cext)
+if (TARGET tileir-to-mlir)
+    add_dependencies(_cext tileir-to-mlir)
+endif()
+# Assembles the importable mlir package, not just the native extension.
+if (TARGET MLIRPythonModules)
+    add_dependencies(_cext MLIRPythonModules)
+    set(_cutile_xpu_mlir_python_package
+        "${CMAKE_BINARY_DIR}/llvm/tools/mlir/python_packages/mlir_core")
+    message(STATUS "XPU: add to PYTHONPATH: ${_cutile_xpu_mlir_python_package}")
+endif()
 
 
 option(DISABLE_INTERNAL "disable internal" OFF)
