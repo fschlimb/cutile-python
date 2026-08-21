@@ -1,4 +1,4 @@
-<!--- SPDX-FileCopyrightText: Copyright (c) <2026> NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!--- SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved. -->
 <!--- SPDX-License-Identifier: Apache-2.0 -->
 
 - Added pluggable backend hooks via ``cuda.tile.set_backend(module="my_backend")`` or positional arguments to retarget compilation (TileIR bytecode → backend binary) and launch to a custom, non-CUDA backend, plus the ``compile_kernel`` / ``clear_backend`` / ``backend_active`` helpers.
