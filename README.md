@@ -13,7 +13,7 @@ or built from source located in the [docs](docs/) folder.
 XPU Backend (uv)
 ================
 The experimental XPU backend targets Intel GPUs and requires
-[tileir-to-mlir](https://github.com/intel-sandbox/users.fschlimb.CudaTileToGPU),
+[tileir-to-mlir](https://github.com/libxsmm/tileir-to-mlir),
 included in this repository as the `tileir-to-mlir` submodule. The default build
 creates the required monolithic LLVM/MLIR build automatically.
 
@@ -80,7 +80,8 @@ cmake -S llvm-project/llvm -B llvm-project/build -G Ninja \
    -DLLVM_INSTALL_UTILS=ON \
    -DLLVM_EXTERNAL_PROJECTS=tileir-to-mlir \
    -DLLVM_EXTERNAL_TILEIR_TO_MLIR_SOURCE_DIR="$PWD/tileir-to-mlir"
-cmake --build llvm-project/build --target tileir-to-mlir MLIRPythonModules
+cmake --build llvm-project/build \
+   --target tileir-to-mlir MLIRPythonModules mlir_levelzero_runtime
 cmake --install llvm-project/build
 ```
 
@@ -103,14 +104,16 @@ Running on XPU
 2. Activate the environment and point to the MLIR Level Zero runtime wrapper:
    ```
    source .venv/bin/activate
-   export LZ_RT_LIB_PATH=/path/to/libze_loader.so
+   export LZ_RT_LIB_PATH=build/llvm/lib/libmlir_levelzero_runtime.so
    ```
+   For a custom installation, use
+   `LZ_RT_LIB_PATH=/path/to/install/lib/libmlir_levelzero_runtime.so` instead.
 3. From the repository root, add the MLIR Python bindings to `PYTHONPATH`. The
    regular build prints the exact command when it finishes; for a monolithic
    installation, use its install prefix:
    ```
-   export PYTHONPATH="build/llvm/tools/mlir/python_packages/mlir_core${PYTHONPATH:+:$PYTHONPATH}"
-   # Or: export PYTHONPATH=/path/to/install/python_packages/mlir_core${PYTHONPATH:+:$PYTHONPATH}
+   export PYTHONPATH=build/llvm/tools/mlir/python_packages/mlir_core:${PYTHONPATH}
+   # Or: export PYTHONPATH=/path/to/install/python_packages/mlir_core:${PYTHONPATH}
    ```
 4. Run an example
    ```

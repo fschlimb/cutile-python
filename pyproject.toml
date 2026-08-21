@@ -42,7 +42,11 @@ dependencies = [
 
 [project.optional-dependencies]
 tileiras = [ "cuda-toolkit[tileiras,nvcc,nvvm]>=13.2,<13.4" ]
-xpu = ["numpy"]
+xpu = [
+    "numpy",
+    "torch==2.13.0+xpu; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "triton-xpu==3.7.2; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
 [project.urls]
 Homepage = "https://github.com/nvidia/cutile-python"
@@ -72,3 +76,15 @@ include = [
 
 [tool.uv]
 managed = true
+# Without this, uv derives a key from `packages.find.where` and stores it as an
+# mtime while comparing it as an inode, so it rebuilds on every sync.
+cache-keys = [{ file = "pyproject.toml" }, { file = "setup.py" }, { file = "CMakeLists.txt" }]
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-xpu" }
+triton-xpu = { index = "pytorch-xpu" }

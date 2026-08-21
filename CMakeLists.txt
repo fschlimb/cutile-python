@@ -70,7 +70,15 @@ endif()
 
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development)
-find_package(CUDAToolkit REQUIRED)
+find_package(CUDAToolkit QUIET)
+option(BUILD_CUDA_EXTENSION "Build the CUDA native extension" ${CUDAToolkit_FOUND})
+if (BUILD_CUDA_EXTENSION AND NOT CUDAToolkit_FOUND)
+    message(FATAL_ERROR "BUILD_CUDA_EXTENSION is ON, but cuda.h was not found.")
+endif()
+if (NOT BUILD_CUDA_EXTENSION)
+    message(STATUS "Building without the CUDA extension; "
+                   "src/cuda/tile/_cext.py provides the CUDA-free fallback")
+endif()
 
 add_custom_target(devinstall
     COMMAND ln -fs "${CMAKE_BINARY_DIR}/cext/lib_cext.so"
@@ -96,15 +104,28 @@ include(cmake/FetchXLAHeaders.cmake)
 fetch_xla_headers()
 
 add_subdirectory(cext)
+
+# The LLVM tree is added EXCLUDE_FROM_ALL, so the XPU toolchain is only built
+# when something in "all" depends on it.
+if (BUILD_CUDA_EXTENSION)
+    set(xpu_toolchain_target _cext)
+else()
+    add_custom_target(xpu_toolchain ALL)
+    set(xpu_toolchain_target xpu_toolchain)
+endif()
+
 if (TARGET tileir-to-mlir)
-    add_dependencies(_cext tileir-to-mlir)
+    add_dependencies(${xpu_toolchain_target} tileir-to-mlir)
 endif()
 # Assembles the importable mlir package, not just the native extension.
 if (TARGET MLIRPythonModules)
-    add_dependencies(_cext MLIRPythonModules)
+    add_dependencies(${xpu_toolchain_target} MLIRPythonModules)
     set(_cutile_xpu_mlir_python_package
         "${CMAKE_BINARY_DIR}/llvm/tools/mlir/python_packages/mlir_core")
     message(STATUS "XPU: add to PYTHONPATH: ${_cutile_xpu_mlir_python_package}")
+endif()
+if (TARGET mlir_levelzero_runtime)
+    add_dependencies(${xpu_toolchain_target} mlir_levelzero_runtime)
 endif()
 
 

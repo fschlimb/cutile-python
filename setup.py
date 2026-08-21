@@ -48,6 +48,32 @@ class BuildExtWithCmake(build_ext):
                 return candidate
         return shutil.which("cmake") or "cmake"
 
+    def _python_executable(self) -> str:
+        if self.editable_mode:
+            scripts_dir = "Scripts" if is_windows else "bin"
+            python_name = "python.exe" if is_windows else "python"
+            project_python = os.path.join(project_root, ".venv", scripts_dir,
+                                          python_name)
+            if os.path.isfile(project_python):
+                return project_python
+        return sys.executable
+
+    @staticmethod
+    def _nanobind_cmake_dir() -> str:
+        import nanobind
+        return nanobind.cmake_dir()
+
+    @staticmethod
+    def _cache_value(build_dir: str, key: str) -> str | None:
+        cache_path = os.path.join(build_dir, "CMakeCache.txt")
+        if not os.path.isfile(cache_path):
+            return None
+        with open(cache_path, encoding="utf-8") as cache_file:
+            for line in cache_file:
+                if line.startswith(f"{key}:"):
+                    return line.partition("=")[2].strip()
+        return None
+
     def _make(self, cmake_executable: str, build_dir: str, build_type: str,
               parallel: int):
         if is_windows:
@@ -63,13 +89,20 @@ class BuildExtWithCmake(build_ext):
 
     def _cmake(self, cmake_executable: str, build_dir: str, build_type: str,
                dlpack_path: str, xla_path: str):
+        python_executable = self._python_executable()
         cmake_cmd = [cmake_executable, "-B", build_dir, project_root,
                      f"-DDLPACK_PATH={dlpack_path}",
                      f"-DXLA_PATH={xla_path}",
                      f"-DCMAKE_BUILD_TYPE={build_type}",
-                     f"-DPython_EXECUTABLE={sys.executable}",
+                 f"-DPython_EXECUTABLE={python_executable}",
+                 f"-Dnanobind_DIR={self._nanobind_cmake_dir()}",
                      "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"]
-        if not os.path.exists(os.path.join(build_dir, "CMakeCache.txt")):
+        generator = self._cache_value(build_dir, "CMAKE_GENERATOR")
+        if not is_windows and generator and generator != "Ninja":
+            raise RuntimeError(
+                f"Existing build directory uses {generator!r}, not Ninja: {build_dir}. "
+                "Remove its CMakeCache.txt and CMakeFiles before rebuilding.")
+        if not is_windows and generator is None:
             cmake_cmd.extend(["-G", "Ninja"])
         cmake_cmd.extend(shlex.split(os.environ.get("CMAKE_ARGS", "")))
         if self.disable_internal:
@@ -93,6 +126,10 @@ class BuildExtWithCmake(build_ext):
         cmake_executable = self._cmake_executable(build_dir)
         self._cmake(cmake_executable, build_dir, build_type, dlpack_path, xla_path)
         self._make(cmake_executable, build_dir, build_type, parallel)
+
+        if self._cache_value(build_dir, "BUILD_CUDA_EXTENSION") != "ON":
+            # No CUDA headers: cuda/tile/_cext.py is used instead.
+            return
 
         for ext in self.extensions:
             src_dir = _get_csrc_dir(ext.name)

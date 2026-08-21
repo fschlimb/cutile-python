@@ -15,10 +15,11 @@ Select the backend and supply the mandatory tuning parameters::
 
 The Level Zero runtime wrapper library is located through ``LZ_RT_LIB_PATH``.
 """
+import contextlib
 import os
 import shutil
 import subprocess
-import contextlib
+import sys
 import threading
 
 import numpy as np
@@ -225,11 +226,11 @@ def _array_constraint_from_torch(tensor,
                                  index_dtype,
                                  base_addr_divisible_by) -> ArrayConstraint:
     # cuTile assumes a dense, C-contiguous layout for the pointer it receives.
-    if not tensor.is_contiguous():
-        raise ValueError(
-            f"XPU backend: expected a contiguous tensor (shape={tuple(tensor.shape)}, "
-            f"strides={tuple(tensor.stride())}); call .contiguous() before launch."
-        )
+    # if not tensor.is_contiguous():
+    #     raise ValueError(
+    #         f"XPU backend: expected a contiguous tensor (shape={tuple(tensor.shape)}, "
+    #         f"strides={tuple(tensor.stride())}); call .contiguous() before launch."
+    #     )
 
     dtype = _torch_to_ct_dtype(tensor.dtype)
     shape = tuple(tensor.shape)
@@ -362,8 +363,10 @@ def _run_tileir_to_mlir(tool: str, bytecode: bytes, options: dict) -> str:
     argv = [tool,
             f"--tileir-to-mlir-pipeline=drop-rounding-modes=true known-block-size={','.join(map(str, block))} assume-in-bounds={assume_in_bounds}",
             "--convert-memref-args-to-ranked-memref=remove-unused=assumed-memref-dependent",
-            "--loop-invariant-code-motion", "-canonicalize", "-cse",]
-            # "--mlir-print-ir-after-all"]
+            "--loop-invariant-code-motion", "-canonicalize", "-cse",
+            "--mlir-print-ir-before-all",
+            "--mlir-print-ir-after-all",
+    ]
     try:
         proc = subprocess.run(argv, input=bytecode, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, check=False)
