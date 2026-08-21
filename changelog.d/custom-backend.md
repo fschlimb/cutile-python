@@ -1,7 +1,7 @@
 <!--- SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved. -->
 <!--- SPDX-License-Identifier: Apache-2.0 -->
 
-- Added pluggable backend hooks via ``cuda.tile.set_backend(module="my_backend")`` or positional arguments to retarget compilation (TileIR bytecode → backend binary) and launch to a custom, non-CUDA backend, plus the ``compile_kernel`` / ``clear_backend`` / ``backend_active`` helpers.
+- Added pluggable backend hooks via ``cuda.tile.set_backend("my_backend")`` or hook keyword arguments to retarget compilation (TileIR bytecode → backend binary) and launch to a custom, non-CUDA backend, plus the ``compile_kernel`` / ``clear_backend`` / ``backend_active`` helpers.
 
 ## Custom backend
 
@@ -20,7 +20,7 @@ Leave either as ``None`` to keep that stage on the default CUDA path.
 
 | Symbol | Notes |
 | --- | --- |
-| ``set_backend(module=None, *, compile_fn=None, launch_fn=None, sm_arch=None)`` | Register hooks. ``module`` can be a string name of a module to import hooks from. ``sm_arch`` (e.g. ``"sm_120"``) overrides device probing, so no NVIDIA GPU is needed. |
+| ``set_backend(module=None, *, compile_fn=None, launch_fn=None, sm_arch=None, bytecode_version=None)`` | Register hooks. ``module`` can be a string name of a module to import hooks from. ``sm_arch`` (e.g. ``"sm_120"``) overrides device probing, so no NVIDIA GPU is needed. ``bytecode_version`` (e.g. ``"13.3"``) bypasses the ``tileiras`` compiler probe, so no CUDA toolkit is needed. |
 | ``clear_backend()`` | Restore the default CUDA path. |
 | ``backend_active()`` | ``True`` while a custom ``launch_fn`` is registered. |
 | ``compile_kernel(kernel, signature, context=...)`` | Compile one signature → ``(binary, symbol)``; routes through ``compile_fn`` if set. |
@@ -50,36 +50,41 @@ backend always needs both hooks.
 
 ```python
 import cuda.tile as ct
-from cuda.tile.compilation import KernelSignature, CallingConvention
+
+# Implement this for the runtime argument types your backend supports.
+from my_backend import build_signature
 
 def my_compile(tileir_bytecode, *, symbol, sm_arch, signature):
     return my_toolchain.compile(tileir_bytecode)        # -> bytes
 
 def my_launch(stream, grid, kernel, args):
-    sig = KernelSignature.from_kernel_args(
-        kernel, args, CallingConvention.cutile_python_v1())
+    sig = build_signature(kernel, args)
     binary, symbol = ct.compile_kernel(kernel, sig)     # -> my_compile
     my_runtime.run(binary, symbol, grid, stream, args)
 
-ct.set_backend(compile_fn=my_compile, launch_fn=my_launch, sm_arch="sm_120")
+ct.set_backend(compile_fn=my_compile, launch_fn=my_launch,
+         sm_arch="sm_120", bytecode_version="13.3")
 # Alternatively, if hooks are in my_backend.py:
-# ct.set_backend("my_backend", sm_arch="sm_120")
+# ct.set_backend("my_backend", sm_arch="sm_120", bytecode_version="13.3")
 # ct.launch(...) now dispatches to my_launch
 ct.clear_backend()
 ```
 
-``KernelSignature.from_kernel_args`` is the launch-time way to specialize a
-kernel for concrete args; it runs the same argument inspection as the default
-launcher (torch / DLPack / ``__cuda_array_interface__`` / scalars / lists), so
-identical shapes/dtypes/strides hit the same cached binary. As with the default
-JIT, this can bake in incidental assumptions (e.g. 16-byte base alignment) from
-the example args.
+When the native CUDA extension is available,
+``KernelSignature.from_kernel_args`` is a convenient ``build_signature``
+implementation. It runs the same argument inspection as the default launcher
+(torch / DLPack / ``__cuda_array_interface__`` / scalars / lists), so identical
+shapes/dtypes/strides hit the same cached binary. CUDA-free builds do not have
+that native inspection API: construct the signature from the backend's runtime
+arguments instead. The XPU backend's ``build_signature`` is a worked example.
+As with the default JIT, deriving a signature from example arguments can bake
+in incidental assumptions (e.g. 16-byte base alignment).
 
 Without concrete arrays (AOT), or to relax such assumptions, build the
 ``KernelSignature`` directly from ``ArrayConstraint`` / ``ScalarConstraint`` /
 ``ConstantConstraint``; ``cuda/tile/jax/_jax.py`` (``_array_constraint``) is a
-worked reference. ``compile_fn`` also backs ``compilation.export_kernel``, so
-one hook covers both JIT and AOT.
+worked reference. ``compilation.export_kernel`` does not use ``compile_fn``;
+export ``tileir_bytecode`` and pass it to the backend toolchain for AOT builds.
 
 Hooks can instead be monkey-patched onto ``cuda.tile._execution.launch`` and
 ``kernel._compile``, but ``set_backend`` avoids import-ordering pitfalls.
