@@ -328,26 +328,26 @@ if __name__ == "__main__":
     # else:
     #     print("Correctness check disabled")
 
-    # # --- Test Case 3: Dimensions Not Multiples of Tile Sizes ---
-    # print("""\n--- Test Case 3: Matrix Multiplication with Dimensions
-    #         Not Perfect Multiples of Tile Sizes ---""")
-    # # Define matrix dimensions that are not exact multiples of the default tile sizes (32, 32, 32).
-    # # This demonstrates that `ceil` in grid calculation correctly handles partial tiles.
-    # M_dim_non_mult = 1000
-    # N_dim_non_mult = 500
-    # K_dim_non_mult = 700
-    # A_non_mult = torch.randn(M_dim_non_mult, K_dim_non_mult, dtype=torch.float16, device=device)
-    # B_non_mult = torch.randn(K_dim_non_mult, N_dim_non_mult, dtype=torch.float16, device=device)
-    # print(f"Input A shape: {A_non_mult.shape}, dtype: {A_non_mult.dtype}")
-    # print(f"Input B shape: {B_non_mult.shape}, dtype: {B_non_mult.dtype}")
+    # --- Test Case 3: Dimensions Not Multiples of Tile Sizes ---
+    print("""\n--- Test Case 3: Matrix Multiplication with Dimensions
+            Not Perfect Multiples of Tile Sizes ---""")
+    # Define matrix dimensions that are not exact multiples of the default tile sizes (32, 32, 32).
+    # This demonstrates that `ceil` in grid calculation correctly handles partial tiles.
+    M_dim_non_mult = 1000
+    N_dim_non_mult = 500
+    K_dim_non_mult = 700
+    A_non_mult = torch.randn(M_dim_non_mult, K_dim_non_mult, dtype=torch.float16, device=device)
+    B_non_mult = torch.randn(K_dim_non_mult, N_dim_non_mult, dtype=torch.float16, device=device)
+    print(f"Input A shape: {A_non_mult.shape}, dtype: {A_non_mult.dtype}")
+    print(f"Input B shape: {B_non_mult.shape}, dtype: {B_non_mult.dtype}")
 
-    # C_non_mult_cutile = cutile_matmul(A_non_mult, B_non_mult, options)
-    # print(f"cuTile Output C shape: {C_non_mult_cutile.shape}, dtype: {C_non_mult_cutile.dtype}")
-    # if args.correctness_check:
-    #     torch.testing.assert_close(C_non_mult_cutile, A_non_mult @ B_non_mult, atol=atol, rtol=rtol)
-    #     print("Correctness check passed")
-    # else:
-    #     print("Correctness check disabled")
+    C_non_mult_cutile = cutile_matmul(A_non_mult, B_non_mult, options)
+    print(f"cuTile Output C shape: {C_non_mult_cutile.shape}, dtype: {C_non_mult_cutile.dtype}")
+    if args.correctness_check:
+        torch.testing.assert_close(C_fp32_cutile, A_fp16.to(torch.float32) @ B_fp16.to(torch.float32), atol=atol, rtol=rtol)
+        print("Correctness check passed")
+    else:
+        print("Correctness check disabled")
 
     # --- Test Case 4: Persistent Matmul ---
     print("\n--- Test Case 4: Matrix Multiplication with Persistent Matmul ---")
