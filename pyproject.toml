@@ -8,7 +8,7 @@ requires = [
     "setuptools==80.10.2",
     "wheel",
     "cmake",
-    "nanobind",
+    "nanobind>=2.9,<3",
 ]
 
 [project]
@@ -78,7 +78,12 @@ include = [
 managed = true
 # Without this, uv derives a key from `packages.find.where` and stores it as an
 # mtime while comparing it as an inode, so it rebuilds on every sync.
-cache-keys = [{ file = "pyproject.toml" }, { file = "setup.py" }, { file = "CMakeLists.txt" }]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "setup.py" },
+    { file = "CMakeLists.txt" },
+    { env = "USE_LLVM_REVISION" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-xpu"

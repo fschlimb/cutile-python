@@ -2,7 +2,8 @@ option(BUILD_TILEIR_TO_MLIR
        "Build TileIRToMLIR for the experimental XPU backend" ON)
 set(CUTILE_XPU_MONOLITHIC_INSTALL_DIR "" CACHE PATH
     "Monolithic LLVM/MLIR install containing bin/tileir-to-mlir")
-set(CUTILE_XPU_LLVM_REVISION "16ca9a2e1a5b6f687adee1ec980bbc40c448b760")
+set(USE_LLVM_REVISION "" CACHE STRING
+    "LLVM revision to build against; defaults to the tileir-to-mlir pin")
 
 if (NOT BUILD_TILEIR_TO_MLIR)
     return()
@@ -31,6 +32,15 @@ endif()
 
 message(STATUS "Building TileIRToMLIR, LLVM, and MLIR from source")
 
+# tileir-to-mlir owns the pin, but it is configured only after LLVM is checked
+# out, so read the same file here and pass the result down to it.
+if (NOT USE_LLVM_REVISION)
+    set(_cutile_llvm_pin "${_tileir_to_mlir_dir}/llvm-revision.txt")
+    # A bumped pin must re-run configure, not just rebuild.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_cutile_llvm_pin}")
+    file(STRINGS "${_cutile_llvm_pin}" USE_LLVM_REVISION LIMIT_COUNT 1)
+endif()
+
 # Intel's setvars scripts advertise Level Zero through the compiler environment
 # variables rather than a package config; these are the names MLIR looks up.
 find_path(LevelZeroRuntime_INCLUDE_DIR
@@ -55,16 +65,12 @@ set(_cutile_llvm_source_dir
 find_package(Git REQUIRED)
 
 if (NOT EXISTS "${_cutile_llvm_source_dir}/llvm/CMakeLists.txt")
-    message(STATUS "Cloning LLVM ${CUTILE_XPU_LLVM_REVISION}")
+    message(STATUS "Cloning LLVM ${USE_LLVM_REVISION}")
     file(REMOVE_RECURSE "${_cutile_llvm_source_dir}")
     execute_process(
         COMMAND "${GIT_EXECUTABLE}" clone --filter=blob:none
                 https://github.com/llvm/llvm-project.git
                 "${_cutile_llvm_source_dir}"
-        COMMAND_ERROR_IS_FATAL ANY)
-    execute_process(
-        COMMAND "${GIT_EXECUTABLE}" -C "${_cutile_llvm_source_dir}"
-                checkout --detach "${CUTILE_XPU_LLVM_REVISION}"
         COMMAND_ERROR_IS_FATAL ANY)
 endif()
 
@@ -73,9 +79,22 @@ execute_process(
     OUTPUT_VARIABLE _llvm_revision
     OUTPUT_STRIP_TRAILING_WHITESPACE
     COMMAND_ERROR_IS_FATAL ANY)
-if (NOT _llvm_revision STREQUAL CUTILE_XPU_LLVM_REVISION)
+if (NOT _llvm_revision STREQUAL USE_LLVM_REVISION)
+    message(STATUS "Checking out LLVM ${USE_LLVM_REVISION}")
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${_cutile_llvm_source_dir}"
+                checkout --detach "${USE_LLVM_REVISION}"
+        COMMAND_ERROR_IS_FATAL ANY)
+endif()
+
+execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${_cutile_llvm_source_dir}" rev-parse HEAD
+    OUTPUT_VARIABLE _llvm_revision
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+if (NOT _llvm_revision STREQUAL USE_LLVM_REVISION)
     message(FATAL_ERROR
-        "TileIRToMLIR requires LLVM ${CUTILE_XPU_LLVM_REVISION}, but "
+        "TileIRToMLIR requires LLVM ${USE_LLVM_REVISION}, but "
         "${_cutile_llvm_source_dir} is at ${_llvm_revision}.")
 endif()
 

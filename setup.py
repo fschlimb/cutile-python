@@ -104,6 +104,8 @@ class BuildExtWithCmake(build_ext):
                 "Remove its CMakeCache.txt and CMakeFiles before rebuilding.")
         if not is_windows and generator is None:
             cmake_cmd.extend(["-G", "Ninja"])
+        cmake_cmd.append(
+            f"-DUSE_LLVM_REVISION={os.environ.get('USE_LLVM_REVISION', '')}")
         cmake_cmd.extend(shlex.split(os.environ.get("CMAKE_ARGS", "")))
         if self.disable_internal:
             cmake_cmd.append("-DDISABLE_INTERNAL=1")

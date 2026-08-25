@@ -66,7 +66,7 @@ lowering path; BMG itself is selected at runtime with `CUTILE_XPU_ARCH=b70`.
 
 ```bash
 git clone --single-branch --branch main https://github.com/llvm/llvm-project.git llvm-project
-git -C llvm-project checkout 16ca9a2e1a5b6f687adee1ec980bbc40c448b760
+git -C llvm-project checkout "$(cat tileir-to-mlir/llvm-revision.txt)"
 cmake -S llvm-project/llvm -B llvm-project/build -G Ninja \
    -DCMAKE_BUILD_TYPE=Release \
    -DCMAKE_INSTALL_PREFIX="$PWD/tileir-to-mlir-install" \

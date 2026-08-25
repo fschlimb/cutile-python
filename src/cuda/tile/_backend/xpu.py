@@ -363,8 +363,8 @@ def _run_tileir_to_mlir(tool: str, bytecode: bytes, options: dict) -> str:
     argv = [tool,
             f"--tileir-to-mlir-pipeline=drop-rounding-modes=true known-block-size={','.join(map(str, block))} assume-in-bounds={assume_in_bounds}",
             "--convert-memref-args-to-ranked-memref=remove-unused=assumed-memref-dependent",
-            "--loop-invariant-code-motion", "-canonicalize", "-cse",
-            "--mlir-print-ir-before-all",
+            # "--loop-invariant-code-motion", "-canonicalize", "-cse",
+            # "--mlir-print-ir-before-all",
             "--mlir-print-ir-after-all",
     ]
     try:
