@@ -2,18 +2,21 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.24)
 project(cuda-tile-python)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
+
+if(NOT MSVC)
+    find_program(CUTILE_LLD_EXECUTABLE NAMES ld.lld REQUIRED)
+    add_link_options(-fuse-ld=lld)
+endif()
 
 if (MSVC)
     set(CMAKE_CXX_STANDARD 20)
 else()
     set(CMAKE_CXX_STANDARD 17)
 endif()
-
-include(cmake/TileIRToMLIR.cmake)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -69,7 +72,17 @@ endif()
 
 
 
-find_package(Python REQUIRED COMPONENTS Interpreter Development)
+find_package(Python REQUIRED COMPONENTS Interpreter Development Development.Module)
+if(NOT nanobind_DIR)
+    execute_process(
+        COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+        OUTPUT_VARIABLE nanobind_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    set(nanobind_DIR "${nanobind_DIR}" CACHE PATH "nanobind CMake package" FORCE)
+endif()
+find_package(nanobind 2.9 CONFIG REQUIRED)
+set(CUTILE_NANOBIND_DIR "${nanobind_DIR}")
 find_package(CUDAToolkit QUIET)
 option(BUILD_CUDA_EXTENSION "Build the CUDA native extension" ${CUDAToolkit_FOUND})
 if (BUILD_CUDA_EXTENSION AND NOT CUDAToolkit_FOUND)
@@ -79,11 +92,6 @@ if (NOT BUILD_CUDA_EXTENSION)
     message(STATUS "Building without the CUDA extension; "
                    "src/cuda/tile/_cext.py provides the CUDA-free fallback")
 endif()
-
-add_custom_target(devinstall
-    COMMAND ln -fs "${CMAKE_BINARY_DIR}/cext/lib_cext.so"
-            ${CMAKE_SOURCE_DIR}/cuda/tile/_cext.so)
-
 
 if (DLPACK_PATH)
     set(dlpack_INCLUDE_DIR "${DLPACK_PATH}/include/dlpack")
@@ -103,29 +111,25 @@ endif()
 include(cmake/FetchXLAHeaders.cmake)
 fetch_xla_headers()
 
-add_subdirectory(cext)
+include(cmake/TileIRToMLIR.cmake)
 
-# The LLVM tree is added EXCLUDE_FROM_ALL, so the XPU toolchain is only built
-# when something in "all" depends on it.
-if (BUILD_CUDA_EXTENSION)
-    set(xpu_toolchain_target _cext)
-else()
-    add_custom_target(xpu_toolchain ALL)
-    set(xpu_toolchain_target xpu_toolchain)
+if(BUILD_CUDA_EXTENSION)
+    add_subdirectory(cext)
+    if(MSVC)
+        set(_cext_suffix ".pyd")
+    else()
+        set(_cext_suffix ".${Python_SOABI}${CMAKE_SHARED_MODULE_SUFFIX}")
+    endif()
+    set_target_properties(_cext PROPERTIES
+        PREFIX ""
+        SUFFIX "${_cext_suffix}")
+    install(TARGETS _cext
+        LIBRARY DESTINATION cuda/tile COMPONENT Python
+        RUNTIME DESTINATION cuda/tile COMPONENT Python)
+    unset(_cext_suffix)
 endif()
-
-if (TARGET tileir-to-mlir)
-    add_dependencies(${xpu_toolchain_target} tileir-to-mlir)
-endif()
-# Assembles the importable mlir package, not just the native extension.
-if (TARGET MLIRPythonModules)
-    add_dependencies(${xpu_toolchain_target} MLIRPythonModules)
-    set(_cutile_xpu_mlir_python_package
-        "${CMAKE_BINARY_DIR}/llvm/tools/mlir/python_packages/mlir_core")
-    message(STATUS "XPU: add to PYTHONPATH: ${_cutile_xpu_mlir_python_package}")
-endif()
-if (TARGET mlir_levelzero_runtime)
-    add_dependencies(${xpu_toolchain_target} mlir_levelzero_runtime)
+if(BUILD_TILEIR_TO_MLIR)
+    add_subdirectory(xpu)
 endif()
 
 

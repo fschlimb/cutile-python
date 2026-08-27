@@ -2,11 +2,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Every target below needs cuda.h.
-if (NOT BUILD_CUDA_EXTENSION)
-    return()
-endif()
-
 if (MSVC)
     # /GR-: -fno-rtti
     # /GS-: disable buffer security check to avoid exception

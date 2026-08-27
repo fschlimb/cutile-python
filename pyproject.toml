@@ -7,7 +7,8 @@ build-backend = "setuptools.build_meta"
 requires = [
     "setuptools==80.10.2",
     "wheel",
-    "cmake",
+    "cmake>=3.24,<4",
+    "ninja",
     "nanobind>=2.9,<3",
 ]
 
@@ -38,6 +39,15 @@ classifiers = [
 
 dependencies = [
   "typing-extensions",
+]
+
+[dependency-groups]
+build = [
+    "setuptools==80.10.2",
+    "wheel",
+    "cmake>=3.24,<4",
+    "ninja",
+    "nanobind>=2.9,<3",
 ]
 
 [project.optional-dependencies]
@@ -76,12 +86,19 @@ include = [
 
 [tool.uv]
 managed = true
+no-build-isolation-package = ["cuda-tile"]
+default-groups = ["build"]
 # Without this, uv derives a key from `packages.find.where` and stores it as an
 # mtime while comparing it as an inode, so it rebuilds on every sync.
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "setup.py" },
     { file = "CMakeLists.txt" },
+    { file = "cmake/**" },
+    { file = "cext/**" },
+    { file = "xpu/**" },
+    { file = "tileir-to-mlir/llvm-revision.txt" },
+    { env = "CMAKE_ARGS" },
     { env = "USE_LLVM_REVISION" },
 ]
 

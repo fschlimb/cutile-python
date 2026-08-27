@@ -5,15 +5,13 @@
 
 Compilation runs the native ``tileir-to-mlir`` tool followed by the XeVM
 pipeline (:mod:`cuda.tile._backend.xeas`); the resulting device binary is
-launched through :mod:`cuda.tile._backend.level_zero_ctypes`.
+launched through the native :mod:`cuda.tile._level_zero` extension.
 
 Select the backend and supply the mandatory tuning parameters::
 
     ct.set_backend("xpu")
     with xpu.compile_options({"wg_m": 128, "wg_n": 128}):
         ct.launch(stream, grid, matmul_kernel, args)
-
-The Level Zero runtime wrapper library is located through ``LZ_RT_LIB_PATH``.
 """
 import contextlib
 import os
@@ -42,9 +40,9 @@ def _build_tree_dir() -> str:
 
 
 from mlir import ir  # noqa: E402
+from cuda.tile._level_zero import launch_level_zero_module_kernel  # noqa: E402
 
 from .xeas import xeas
-from .level_zero_ctypes import launch_level_zero_module_kernel
 
 # cuTile identifies a compile target by an `sm_<number>` style string. Xe
 # devices have no such number, so each supported device gets a distinct value
@@ -174,22 +172,19 @@ def _launch_block(options: dict) -> tuple:
     return ((wg_m // sg_m) * (wg_n // sg_n) * _SUBGROUP_SIZE, 1, 1)
 
 
+def _triplet(value) -> tuple:
+    values = (value,) if isinstance(value, int) else tuple(value)
+    if not 1 <= len(values) <= 3:
+        raise ValueError("launch dimensions must have length 1 to 3")
+    return values + (1,) * (3 - len(values))
+
+
 def _xeas_options(options: dict) -> dict:
     """Build the :func:`~cuda.tile._backend.xeas.xeas` keyword arguments."""
     return {
         "xegpu_op_level": options.get("xegpu_op_level", "workgroup"),
         "large_register_file": options.get("large_register_file", True),
     }
-
-
-def _runtime_library_path() -> str:
-    """Path to the Level Zero runtime wrapper library."""
-    path = os.environ.get("LZ_RT_LIB_PATH")
-    if path is None:
-        raise RuntimeError(
-            "XPU backend: LZ_RT_LIB_PATH must be set to your "
-            "libmlir_levelzero_runtime.so")
-    return path
 
 
 _torch = None
@@ -365,7 +360,7 @@ def _run_tileir_to_mlir(tool: str, bytecode: bytes, options: dict) -> str:
             "--convert-memref-args-to-ranked-memref=remove-unused=assumed-memref-dependent",
             # "--loop-invariant-code-motion", "-canonicalize", "-cse",
             # "--mlir-print-ir-before-all",
-            "--mlir-print-ir-after-all",
+            # "--mlir-print-ir-after-all",
     ]
     try:
         proc = subprocess.run(argv, input=bytecode, stdout=subprocess.PIPE,
@@ -430,9 +425,8 @@ def _scalar_arg(value, constraint: ScalarConstraint):
 def _runtime_kernel_args(signature: KernelSignature, args: tuple) -> list:
     """Build the kernel argument list expected by the Xe kernel.
 
-    Compile-time constants are dropped (they are baked into the binary), tensors
-    are forwarded as-is (the Level Zero launcher expands them into memref
-    descriptors) and scalars become NumPy values carrying their signature dtype.
+    Compile-time constants are dropped, tensors become memref metadata, and
+    scalars become bytes with the ABI type carried by the signature.
     """
     torch = _torch_api()
     flat = []
@@ -440,9 +434,9 @@ def _runtime_kernel_args(signature: KernelSignature, args: tuple) -> list:
         if isinstance(param, ConstantConstraint):
             continue
         if isinstance(arg, torch.Tensor):
-            flat.append(arg)
+            flat.append((arg.data_ptr(), tuple(arg.shape), arg.stride()))
         elif isinstance(param, ScalarConstraint):
-            flat.append(_scalar_arg(arg, param))
+            flat.append(_scalar_arg(arg, param).tobytes())
         else:
             raise TypeError(
                 f"XPU backend: unsupported runtime argument {type(arg).__name__}")
@@ -457,7 +451,6 @@ def launch(stream, grid, kernel, args):
     (compile-time constants are baked into the binary).
     """
     options = _current_options()
-    library_path = _runtime_library_path()
     block = _launch_block(options)
 
     sig = build_signature(kernel, args)
@@ -475,5 +468,4 @@ def launch(stream, grid, kernel, args):
         stream.synchronize()
 
     launch_level_zero_module_kernel(
-        binary, sig.symbol, runtime_args, [], grid, block,
-        library_path=library_path)
+        binary, sig.symbol, runtime_args, _triplet(grid), _triplet(block))

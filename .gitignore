@@ -12,7 +12,9 @@ env
 deps
 *.nsys-rep
 *.so
+*.so.*
 build/
+.llvm-project/
 .cache
 .idea
 .rgignore

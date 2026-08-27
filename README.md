@@ -10,117 +10,100 @@ or built from source located in the [docs](docs/) folder.
 
 --------------------------------------------------------
 --------------------------------------------------------
+
 XPU Backend (uv)
-================
+----------------
+
 The experimental XPU backend targets Intel GPUs and requires
 [tileir-to-mlir](https://github.com/libxsmm/tileir-to-mlir),
-included in this repository as the `tileir-to-mlir` submodule. The default build
-creates the required monolithic LLVM/MLIR build automatically.
+included in this repository as the `tileir-to-mlir` submodule. The required
+LLVM/MLIR and TileIRToMLIR toolchain is built automatically.
 
 Prerequisites
 -------------
 
-Building requires CMake 3.20+, Ninja, a C++17 compiler, the CUDA Toolkit, and
-the Intel GPU software. An XPU is required only to run kernels. Install `uv`
-using the [installation guide](https://docs.astral.sh/uv/getting-started/installation/),
-then initialize the submodules and configure the Intel environment from the
-repository root:
+Building requires Git, Clang, LLD, and the Intel GPU software including Level
+Zero headers and its loader. The XPU dependencies currently require Python 3.12
+on Linux x86-64. A CUDA Toolkit is not required for an XPU-only build, and an
+XPU device is required only to run kernels. Install `uv` using the
+[installation guide](https://docs.astral.sh/uv/getting-started/installation/),
+then initialize the environment from the repository root. `uv sync` installs
+the required CMake, Ninja, and Python build packages into `.venv`.
 
 ```bash
 git submodule update --init --recursive
-. /swtools/intel/setvars.sh --force
-. /swtools/intel-gpu/latest/intel_gpu_vars.sh
+uv venv --python 3.12
+source .venv/bin/activate
+. <path-to>/intel/setvars.sh --force
+. <path-to>/intel-gpu/latest/intel_gpu_vars.sh
 ```
+
+Initialize the Intel environment once in each fresh shell. Adjust the script
+paths for the local Intel software installation. Without environment scripts,
+set `LEVEL_ZERO_DIR` to the Level Zero installation root and ensure that Intel
+GPU tools such as `ocloc` are on `PATH`.
 
 Automatic XPU build (recommended)
 ---------------------------------
-
-The cuTile CMake build downloads the LLVM revision pinned by `tileir-to-mlir`,
-builds LLVM/MLIR with the XPU options, then builds the submodule as part of the
-normal extension build:
 
 ```bash
 uv sync --extra xpu
 ```
 
-This creates `.venv`, installs NumPy, builds the C++ extension, and places the
-tool at `build/llvm/bin/tileir-to-mlir`.
+No additional build-isolation options are needed. The first build checks out and
+builds the LLVM revision required by TileIRToMLIR. Later builds reuse the
+checkout and build outputs, recompiling only changed sources and dependencies.
 
-Custom TileIRToMLIR build
--------------------------
-
-To use an existing monolithic LLVM/MLIR and TileIRToMLIR installation, pass its
-install prefix to cuTile. CMake does not download or build LLVM, MLIR, or
-TileIRToMLIR in this mode. The prefix must contain `bin/tileir-to-mlir`; leave
-`BUILD_TILEIR_TO_MLIR` enabled because the installation-prefix option selects
-this mode.
+Override the required LLVM revision when needed:
 
 ```bash
-CMAKE_ARGS="-DCUTILE_XPU_MONOLITHIC_INSTALL_DIR=/path/to/install" uv sync --extra xpu
+USE_LLVM_REVISION=commit-or-tag uv sync --extra xpu
 ```
 
-To create that installation manually, use the LLVM revision required by the
-submodule and configure TileIRToMLIR as an LLVM external project. The SPIR-V
-experimental target and Level Zero runner options enable the BMG (Battlemage)
-lowering path; BMG itself is selected at runtime with `CUTILE_XPU_ARCH=b70`.
+Reusing custom LLVM and TileIRToMLIR builds
+-------------------------------------------
+
+Install the custom LLVM/MLIR and TileIRToMLIR builds into a common prefix, then
+pass that prefix to cuTile. The installation must use the LLVM revision required
+by TileIRToMLIR and provide `tileir-to-mlir`, the MLIR Level Zero runtime, and
+the MLIR Python bindings.
 
 ```bash
-git clone --single-branch --branch main https://github.com/llvm/llvm-project.git llvm-project
-git -C llvm-project checkout "$(cat tileir-to-mlir/llvm-revision.txt)"
-cmake -S llvm-project/llvm -B llvm-project/build -G Ninja \
-   -DCMAKE_BUILD_TYPE=Release \
-   -DCMAKE_INSTALL_PREFIX="$PWD/tileir-to-mlir-install" \
-   -DLLVM_ENABLE_PROJECTS='mlir' \
-   -DLLVM_TARGETS_TO_BUILD='host' \
-   -DLLVM_ENABLE_ASSERTIONS=ON \
-   -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="SPIRV" \
-   -DMLIR_ENABLE_LEVELZERO_RUNNER=1 \
-   -DMLIR_ENABLE_BINDINGS_PYTHON=1 \
-   -DPython3_EXECUTABLE="$(which python3)" \
-   -DLLVM_INSTALL_UTILS=ON \
-   -DLLVM_EXTERNAL_PROJECTS=tileir-to-mlir \
-   -DLLVM_EXTERNAL_TILEIR_TO_MLIR_SOURCE_DIR="$PWD/tileir-to-mlir"
-cmake --build llvm-project/build \
-   --target tileir-to-mlir MLIRPythonModules mlir_levelzero_runtime
-cmake --install llvm-project/build
-```
-
-You can now build cuTile with that installation:
-
-```bash
-CMAKE_ARGS="-DCUTILE_XPU_MONOLITHIC_INSTALL_DIR=$PWD/tileir-to-mlir-install" \
+CMAKE_ARGS="-DCUTILE_XPU_MONOLITHIC_INSTALL_DIR=/path/to/prefix" \
    uv sync --extra xpu
 ```
 
 Running on XPU
 --------------
 
-1. Log in to a node with an XPU device and set up the XPU environment:
-   ```
-   . /swtools/intel/setvars.sh --force
-   . /swtools/intel-gpu/latest/intel_gpu_vars.sh
-   ```
-   The Intel GPU tools (e.g. `ocloc`) should now be on `PATH`.
-2. Activate the environment and point to the MLIR Level Zero runtime wrapper:
-   ```
+1. Log in to a node with an XPU device and initialize a fresh shell once:
+
+   ```bash
    source .venv/bin/activate
-   export LZ_RT_LIB_PATH=build/llvm/lib/libmlir_levelzero_runtime.so
+   . <path-to>/intel/setvars.sh --force
+   . <path-to>/intel-gpu/latest/intel_gpu_vars.sh
    ```
-   For a custom installation, use
-   `LZ_RT_LIB_PATH=/path/to/install/lib/libmlir_levelzero_runtime.so` instead.
-3. From the repository root, add the MLIR Python bindings to `PYTHONPATH`. The
+
+   Adjust the script paths for the local Intel software installation. The MLIR
+   Level Zero runtime is packaged with the native launcher.
+2. From the repository root, add the MLIR Python bindings to `PYTHONPATH`. The
    regular build prints the exact command when it finishes; for a monolithic
    installation, use its install prefix:
-   ```
+
+   ```bash
    export PYTHONPATH=build/llvm/tools/mlir/python_packages/mlir_core:${PYTHONPATH}
    # Or: export PYTHONPATH=/path/to/install/python_packages/mlir_core:${PYTHONPATH}
    ```
-4. Run an example
-   ```
+
+3. Run an example
+
+   ```bash
    python -u samples/MatMul-xpu.py --correctness-check
    ```
+
    Optional environment variables: `CUTILE_XPU_ARCH` selects the target architecture,
-   `CUTILE_XPU_DUMP_MLIR` dumps the generated MLIR.
+   `CUTILE_XPU_DUMP_MLIR` dumps the generated MLIR, and
+   `CUTILE_XPU_TILEIR_TO_MLIR` overrides the compiler tool path.
 
 How to adapt an existing cuTile program
 ---------------------------------------
@@ -138,6 +121,7 @@ How to adapt an existing cuTile program
 
 Notes
 -----
+
 This is an experimental extension. The implementation is not complete and you should not
 expect good performance when running the kernels. At this point it is merely a POC for running
 cutile/tileir on XPU. Getting good performance requires a more sophisticated compiler pipeline
@@ -226,14 +210,15 @@ Building from Source
 cuTile is written mostly in Python, but includes a C++ extension which needs to be built.
 You will need:
 - A C++17-capable compiler, such as GNU C++ or MSVC;
-- CMake 3.20+;
-- GNU Make on Linux or msbuild on Windows;
+- CMake 3.24+;
+- Ninja and LLD on Linux, or msbuild on Windows;
 - Python 3.10+ with development headers (`venv` module is recommended but optional);
-- [CUDA Toolkit 13.1+](https://developer.nvidia.com/cuda-downloads)
+- [CUDA Toolkit 13.1+](https://developer.nvidia.com/cuda-downloads) headers when
+   building the CUDA extension.
 
 On an Ubuntu system, the first four dependencies can be installed with APT:
 ```
-sudo apt-get update && sudo apt-get install build-essential cmake python3-dev python3-venv
+sudo apt-get update && sudo apt-get install build-essential cmake ninja-build lld python3-dev python3-venv
 ```
 
 The CMakeLists.txt script will also automatically download
@@ -251,18 +236,24 @@ source env/bin/activate
 ```
 
 Once the build dependencies are in place, the simplest way to build cuTile is to install it
-in editable mode by running the following command in the source root directory:
+in editable mode. Install the build requirements into the environment and disable
+build isolation so CMake records persistent paths:
 
 ```
-pip install -e .
+pip install "setuptools==80.10.2" wheel "nanobind>=2.9,<3"
+CMAKE_ARGS="-DBUILD_TILEIR_TO_MLIR=OFF" pip install --no-build-isolation -e .
 ```
 
-This will create the `build` directory and invoke the CMake-based build process.
-In editable mode, the compiled extension module will be placed in the build directory,
-and then a symbolic link to it will be created in the source directory.
-This makes sure that the `pip install -e .` command above is needed only once, and recompiling
-the extension after making changes to the C++ code can be done with `make -C build`
-which is much faster. This logic is defined in [setup.py](./setup.py).
+`BUILD_TILEIR_TO_MLIR=OFF` disables the XPU backend; the CUDA extension is built
+when CUDA headers are available. Omit that option after initializing the Intel
+environment when building the XPU backend. The command creates the `build`
+directory and invokes the CMake build and install steps. After changing C++
+code, rebuild and restage the native modules with:
+
+```
+cmake --build build --parallel
+cmake --install build --prefix src --component Python
+```
 
 Experimental Features (Optional)
 --------------------------------
