@@ -28,8 +28,8 @@ class BuildExtWithCmake(build_ext):
         scripts_dir = "Scripts" if is_windows else "bin"
         python_name = "python.exe" if is_windows else "python"
         environments = [
-            os.environ.get("VIRTUAL_ENV", ""),
             os.path.join(project_root, ".venv"),
+            os.environ.get("VIRTUAL_ENV", ""),
         ]
         for environment in environments:
             candidate = os.path.join(os.path.realpath(environment), scripts_dir,
@@ -39,10 +39,12 @@ class BuildExtWithCmake(build_ext):
         return sys.executable
 
     def _configure(self, build_dir: str, build_type: str):
+        variant = os.getenv("CUTILE_BUILD_VARIANT", "cuda")
         cmake_cmd = ["cmake", "-S", project_root, "-B", build_dir,
                      f"-DDLPACK_PATH={os.getenv('CUDA_TILE_CMAKE_DLPACK_PATH', '')}",
                      f"-DXLA_PATH={os.getenv('CUDA_TILE_CMAKE_XLA_PATH', '')}",
                      f"-DCMAKE_BUILD_TYPE={build_type}",
+                     f"-DCUTILE_BUILD_VARIANT={variant}",
                      f"-DPython_EXECUTABLE={self._python_executable()}"]
         if not is_windows and not os.path.isfile(
                 os.path.join(build_dir, "CMakeCache.txt")):
@@ -55,6 +57,10 @@ class BuildExtWithCmake(build_ext):
         self.spawn(cmake_cmd)
 
     def run(self):
+        if (os.getenv("CUDA_TILE_SKIP_CMAKE_BUILD") == "1"
+            and os.getenv("CUTILE_BUILD_VARIANT") == "cpu"):
+            return
+
         build_dir = os.getenv("CUDA_TILE_CEXT_BUILD_DIR")
         if not build_dir:
             if self.editable_mode or self.inplace:
@@ -68,8 +74,17 @@ class BuildExtWithCmake(build_ext):
                           if self.editable_mode or self.inplace
                           else os.path.abspath(self.build_lib))
         self._configure(build_dir, build_type)
+        variant = os.getenv("CUTILE_BUILD_VARIANT", "cuda")
+        targets = {
+            "cuda": ["cutile_cuda_python"],
+            "xpu": ["_level_zero"],
+            "cpu": ["cutile_cpu_prerequisites"],
+        }
+        if variant not in targets:
+            raise RuntimeError(
+                "CUTILE_BUILD_VARIANT must be one of: cuda, xpu, cpu")
         self.spawn(["cmake", "--build", build_dir,
-                    "--parallel", str(parallel)])
+                    "--parallel", str(parallel), "--target", *targets[variant]])
         self.spawn(["cmake", "--install", build_dir,
                     "--prefix", install_prefix,
                     "--component", "Python"])

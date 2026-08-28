@@ -43,11 +43,14 @@ paths for the local Intel software installation. Without environment scripts,
 set `LEVEL_ZERO_DIR` to the Level Zero installation root and ensure that Intel
 GPU tools such as `ocloc` are on `PATH`.
 
-Automatic XPU build (recommended)
----------------------------------
+Backend builds
+--------------
+
+CUDA, XPU, and CPU installations are mutually exclusive. Use the backend sync
+wrapper so the native build and selected uv extra agree:
 
 ```bash
-uv sync --extra xpu
+scripts/sync-backend.sh xpu
 ```
 
 No additional build-isolation options are needed. The first build checks out and
@@ -57,8 +60,45 @@ checkout and build outputs, recompiling only changed sources and dependencies.
 Override the required LLVM revision when needed:
 
 ```bash
-USE_LLVM_REVISION=commit-or-tag uv sync --extra xpu
+USE_LLVM_REVISION=commit-or-tag scripts/sync-backend.sh xpu
 ```
+
+Revision locations
+------------------
+
+The related revisions have distinct purposes:
+
+- `pyproject.toml`, under `tool.uv.sources.triton`, pins the Triton CPU source
+   commit installed by uv.
+- The `tileir-to-mlir` submodule entry in this repository pins the
+   TileIRToMLIR source commit.
+- `cmake/triton-cpu-required-llvm-revision.txt` records the minimum LLVM commit
+   required by the pinned Triton CPU source.
+- `tileir-to-mlir/llvm-revision.txt` records the minimum LLVM commit required
+   by TileIRToMLIR. This filename belongs to the TileIRToMLIR submodule and is
+   therefore kept as defined upstream.
+
+The build selects the newer compatible LLVM requirement. `USE_LLVM_REVISION`
+may select a still newer descendant; older or divergent revisions are rejected.
+
+CPU Backend
+-----------
+
+The experimental CPU backend uses the pinned Triton CPU fork and the LLVM
+revision required by TileIRToMLIR. If Triton CPU requires a newer revision, the
+newer descendant is selected; older or divergent overrides are rejected.
+
+```bash
+scripts/sync-backend.sh cpu
+python samples/VectorAddition-cpu.py
+```
+
+The first build creates persistent LLVM and revision-scoped Triton caches in
+`build/llvm` and `build/triton-cpu-<revision>`. Pass `CUTILE_LLVM_SOURCE_DIR`, `CUTILE_LLVM_BINARY_DIR`, or
+`CUTILE_TILEIR_BINARY_DIR` through `CMAKE_ARGS`, and set `TRITON_BUILD_DIR` in
+the environment, to reuse custom builds. CPU launches are synchronous and currently
+support NumPy-compatible arrays, scalar arguments, constants, and one- to
+three-dimensional grids.
 
 Reusing custom LLVM and TileIRToMLIR builds
 -------------------------------------------
@@ -70,7 +110,7 @@ the MLIR Python bindings.
 
 ```bash
 CMAKE_ARGS="-DCUTILE_XPU_MONOLITHIC_INSTALL_DIR=/path/to/prefix" \
-   uv sync --extra xpu
+   scripts/sync-backend.sh xpu
 ```
 
 Running on XPU
@@ -187,10 +227,12 @@ Installing from PyPI
 --------------------
 cuTile Python is published on [PyPI](https://pypi.org/) under the
 [cuda-tile](https://pypi.org/project/cuda-tile/) package name and can be installed with `pip`:
+
+```bash
+pip install cuda-tile[cuda]
 ```
-pip install cuda-tile[tileiras]
-```
-The optional `tileiras` dependency installs the `tileiras` compiler directly into your python
+
+The optional `cuda` dependency installs the `tileiras` compiler directly into your Python
 environment.
 
 

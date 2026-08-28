@@ -1,5 +1,12 @@
+if(CUTILE_BUILD_VARIANT MATCHES "^(xpu|cpu)$")
+    set(_cutile_build_tileir_default ON)
+else()
+    set(_cutile_build_tileir_default OFF)
+endif()
 option(BUILD_TILEIR_TO_MLIR
-       "Build TileIRToMLIR for the experimental XPU backend" ON)
+       "Build TileIRToMLIR for non-CUDA backends"
+       ${_cutile_build_tileir_default})
+unset(_cutile_build_tileir_default)
 set(CUTILE_XPU_MONOLITHIC_INSTALL_DIR "" CACHE PATH
     "Existing LLVM/MLIR and TileIRToMLIR installation")
 
@@ -13,7 +20,7 @@ if(NOT EXISTS "${_tileir_to_mlir_dir}/CMakeLists.txt")
         "TileIRToMLIR sources are missing. Initialize the tileir-to-mlir submodule.")
 endif()
 
-if(CUTILE_XPU_MONOLITHIC_INSTALL_DIR)
+if(CUTILE_BUILD_VARIANT STREQUAL "xpu" AND CUTILE_XPU_MONOLITHIC_INSTALL_DIR)
     set(CUTILE_XPU_TOOL_PATH
         "${CUTILE_XPU_MONOLITHIC_INSTALL_DIR}/bin/tileir-to-mlir${CMAKE_EXECUTABLE_SUFFIX}")
     find_library(CUTILE_XPU_RUNTIME_PATH
@@ -29,17 +36,24 @@ if(CUTILE_XPU_MONOLITHIC_INSTALL_DIR)
     return()
 endif()
 
-set(_cutile_llvm_pin "${_tileir_to_mlir_dir}/llvm-revision.txt")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_cutile_llvm_pin}")
-file(STRINGS "${_cutile_llvm_pin}" _cutile_llvm_default_revision LIMIT_COUNT 1)
+set(_tileir_required_llvm_revision_file
+    "${_tileir_to_mlir_dir}/llvm-revision.txt")
+set(_triton_required_llvm_revision_file
+    "${CMAKE_CURRENT_LIST_DIR}/triton-cpu-required-llvm-revision.txt")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${_tileir_required_llvm_revision_file}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${_triton_required_llvm_revision_file}")
+file(STRINGS "${_tileir_required_llvm_revision_file}"
+     _tileir_required_llvm_revision LIMIT_COUNT 1)
+file(STRINGS "${_triton_required_llvm_revision_file}"
+     _triton_required_llvm_revision LIMIT_COUNT 1)
+set(_cutile_llvm_override "")
 if(DEFINED ENV{USE_LLVM_REVISION} AND NOT "$ENV{USE_LLVM_REVISION}" STREQUAL "")
-    set(CUTILE_LLVM_REVISION "$ENV{USE_LLVM_REVISION}")
+    set(_cutile_llvm_override "$ENV{USE_LLVM_REVISION}")
 elseif(DEFINED USE_LLVM_REVISION AND NOT USE_LLVM_REVISION STREQUAL "")
-    set(CUTILE_LLVM_REVISION "${USE_LLVM_REVISION}")
-else()
-    set(CUTILE_LLVM_REVISION "${_cutile_llvm_default_revision}")
+    set(_cutile_llvm_override "${USE_LLVM_REVISION}")
 endif()
-unset(_cutile_llvm_default_revision)
 
 set(CUTILE_LLVM_SOURCE_DIR "${CMAKE_SOURCE_DIR}/.llvm-project" CACHE PATH
     "Persistent LLVM source checkout")
@@ -53,25 +67,28 @@ set(CUTILE_LLVM_BUILD_TYPE "Release" CACHE STRING
 find_package(Git REQUIRED)
 find_program(CUTILE_CLANG_EXECUTABLE NAMES clang REQUIRED)
 find_program(CUTILE_CLANGXX_EXECUTABLE NAMES clang++ REQUIRED)
-find_path(LevelZeroRuntime_INCLUDE_DIR
-    NAMES level_zero/ze_api.h
-    HINTS ${LEVEL_ZERO_DIR} ENV LEVEL_ZERO_DIR
-          ENV CPATH ENV C_INCLUDE_PATH ENV CPLUS_INCLUDE_PATH
-    PATH_SUFFIXES include)
-find_library(LevelZeroRuntime_LIBRARY
-    NAMES ze_loader
-    HINTS ${LEVEL_ZERO_DIR} ENV LEVEL_ZERO_DIR
-          ENV LIBRARY_PATH ENV LD_LIBRARY_PATH
-    PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
-if(NOT LevelZeroRuntime_INCLUDE_DIR OR NOT LevelZeroRuntime_LIBRARY)
-    message(FATAL_ERROR
-        "Level Zero was not found. Source the Intel environment scripts or set LEVEL_ZERO_DIR.")
+if(CUTILE_BUILD_VARIANT STREQUAL "xpu")
+    find_path(LevelZeroRuntime_INCLUDE_DIR
+        NAMES level_zero/ze_api.h
+        HINTS ${LEVEL_ZERO_DIR} ENV LEVEL_ZERO_DIR
+              ENV CPATH ENV C_INCLUDE_PATH ENV CPLUS_INCLUDE_PATH
+        PATH_SUFFIXES include)
+    find_library(LevelZeroRuntime_LIBRARY
+        NAMES ze_loader
+        HINTS ${LEVEL_ZERO_DIR} ENV LEVEL_ZERO_DIR
+              ENV LIBRARY_PATH ENV LD_LIBRARY_PATH
+        PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
+    if(NOT LevelZeroRuntime_INCLUDE_DIR OR NOT LevelZeroRuntime_LIBRARY)
+        message(FATAL_ERROR
+            "Level Zero was not found. Source the Intel environment scripts or set LEVEL_ZERO_DIR.")
+    endif()
 endif()
 
 include(ExternalProject)
-set(_cutile_revision_file "${CMAKE_BINARY_DIR}/xpu-toolchain/llvm-revision.txt")
-file(CONFIGURE OUTPUT "${_cutile_revision_file}"
-     CONTENT "${CUTILE_LLVM_REVISION}\n" @ONLY)
+set(_required_llvm_revisions_file
+    "${CMAKE_BINARY_DIR}/tileir-toolchain/required-llvm-revisions.txt")
+file(CONFIGURE OUTPUT "${_required_llvm_revisions_file}"
+    CONTENT "tileir=${_tileir_required_llvm_revision}\ntriton=${_triton_required_llvm_revision}\noverride=${_cutile_llvm_override}\n" @ONLY)
 
 set(CUTILE_XPU_RUNTIME_PATH
     "${CUTILE_LLVM_BINARY_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}mlir_levelzero_runtime${CMAKE_SHARED_LIBRARY_SUFFIX}")
@@ -85,11 +102,63 @@ set(_cutile_checkout_command
     "${CMAKE_COMMAND}"
     "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
     "-DSOURCE_DIR=${CUTILE_LLVM_SOURCE_DIR}"
-    "-DREVISION=${CUTILE_LLVM_REVISION}"
+    "-DTILEIR_REQUIRED_LLVM_REVISION=${_tileir_required_llvm_revision}"
+    "-DTRITON_REQUIRED_LLVM_REVISION=${_triton_required_llvm_revision}"
+    "-DREVISION=${_cutile_llvm_override}"
     -P "${_cutile_checkout_script}")
 
+if(CUTILE_BUILD_VARIANT STREQUAL "cpu")
+    set(_cutile_llvm_targets host)
+    set(_cutile_llvm_projects mlir)
+    set(_cutile_llvm_experimental_targets "")
+    set(_cutile_llvm_build_targets all)
+    set(_cutile_llvm_build_always OFF)
+    set(_cutile_llvm_byproduct_args)
+else()
+    set(_cutile_llvm_targets host)
+    set(_cutile_llvm_projects mlir)
+    set(_cutile_llvm_experimental_targets SPIRV)
+    set(_cutile_llvm_build_targets
+        mlir_levelzero_runtime MLIRPythonModules MLIROptLib)
+    set(_cutile_llvm_build_always ON)
+    set(_cutile_llvm_byproduct_args BUILD_BYPRODUCTS
+        "${CUTILE_XPU_RUNTIME_PATH}"
+        "${CUTILE_XPU_MLIR_PYTHON_DIR}/mlir/ir.py")
+endif()
+
+set(_cutile_llvm_cmake_args
+    "-DCMAKE_BUILD_TYPE:STRING=${CUTILE_LLVM_BUILD_TYPE}"
+    "-DCMAKE_C_COMPILER:FILEPATH=${CUTILE_CLANG_EXECUTABLE}"
+    "-DCMAKE_CXX_COMPILER:FILEPATH=${CUTILE_CLANGXX_EXECUTABLE}"
+    "-DCMAKE_LINKER:FILEPATH=${CUTILE_LLD_EXECUTABLE}"
+    "-DLLVM_ENABLE_PROJECTS:STRING=${_cutile_llvm_projects}"
+    -DLLVM_USE_LINKER:STRING=lld
+    "-DLLVM_TARGETS_TO_BUILD:STRING=${_cutile_llvm_targets}"
+    "-DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD:STRING=${_cutile_llvm_experimental_targets}"
+    -DLLVM_ENABLE_ASSERTIONS:BOOL=ON
+    -DLLVM_INSTALL_UTILS:BOOL=ON
+    -DLLVM_INCLUDE_TESTS:BOOL=OFF
+    -DLLVM_INCLUDE_BENCHMARKS:BOOL=OFF
+    -DLLVM_INCLUDE_EXAMPLES:BOOL=OFF
+    -DMLIR_INCLUDE_TESTS:BOOL=OFF
+    -DMLIR_ENABLE_EXECUTION_ENGINE:BOOL=ON
+    -DMLIR_ENABLE_LEVELZERO_RUNNER:BOOL=OFF
+    -DMLIR_ENABLE_BINDINGS_PYTHON:BOOL=OFF
+    "-DPython3_EXECUTABLE:FILEPATH=${Python_EXECUTABLE}"
+    "-Dnanobind_DIR:PATH=${CUTILE_NANOBIND_DIR}")
+if(CUTILE_BUILD_VARIANT STREQUAL "xpu")
+    list(APPEND _cutile_llvm_cmake_args
+        -DMLIR_ENABLE_LEVELZERO_RUNNER:BOOL=ON
+        -DMLIR_ENABLE_BINDINGS_PYTHON:BOOL=ON
+        "-DCMAKE_PROJECT_INCLUDE:FILEPATH=${CMAKE_CURRENT_LIST_DIR}/ExplicitLevelZeroInclude.cmake"
+        "-DCUTILE_LEVEL_ZERO_INCLUDE_DIR:PATH=${LevelZeroRuntime_INCLUDE_DIR}"
+        "-DLevelZeroRuntime_INCLUDE_DIR:PATH=${LevelZeroRuntime_INCLUDE_DIR}"
+        "-DLevelZeroRuntime_INCLUDE_DIRS:STRING=${LevelZeroRuntime_INCLUDE_DIR}"
+        "-DLevelZeroRuntime_LIBRARY:FILEPATH=${LevelZeroRuntime_LIBRARY}")
+endif()
+
 ExternalProject_Add(cutile_llvm
-    PREFIX "${CMAKE_BINARY_DIR}/xpu-toolchain/llvm"
+    PREFIX "${CMAKE_BINARY_DIR}/tileir-toolchain/llvm"
     SOURCE_DIR "${CUTILE_LLVM_SOURCE_DIR}"
     SOURCE_SUBDIR llvm
     BINARY_DIR "${CUTILE_LLVM_BINARY_DIR}"
@@ -97,49 +166,24 @@ ExternalProject_Add(cutile_llvm
     UPDATE_COMMAND ""
     PATCH_COMMAND ""
     CMAKE_GENERATOR Ninja
-    CMAKE_ARGS
-        "-DCMAKE_BUILD_TYPE:STRING=${CUTILE_LLVM_BUILD_TYPE}"
-        "-DCMAKE_C_COMPILER:FILEPATH=${CUTILE_CLANG_EXECUTABLE}"
-        "-DCMAKE_CXX_COMPILER:FILEPATH=${CUTILE_CLANGXX_EXECUTABLE}"
-        "-DCMAKE_LINKER:FILEPATH=${CUTILE_LLD_EXECUTABLE}"
-        -DLLVM_ENABLE_PROJECTS:STRING=mlir
-        -DLLVM_USE_LINKER:STRING=lld
-        -DLLVM_TARGETS_TO_BUILD:STRING=host
-        -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD:STRING=SPIRV
-        -DLLVM_ENABLE_ASSERTIONS:BOOL=ON
-        -DLLVM_INSTALL_UTILS:BOOL=ON
-        -DLLVM_INCLUDE_TESTS:BOOL=OFF
-        -DLLVM_INCLUDE_BENCHMARKS:BOOL=OFF
-        -DLLVM_INCLUDE_EXAMPLES:BOOL=OFF
-        -DMLIR_INCLUDE_TESTS:BOOL=OFF
-        -DMLIR_ENABLE_EXECUTION_ENGINE:BOOL=ON
-        -DMLIR_ENABLE_LEVELZERO_RUNNER:BOOL=ON
-        -DMLIR_ENABLE_BINDINGS_PYTHON:BOOL=ON
-        "-DPython3_EXECUTABLE:FILEPATH=${Python_EXECUTABLE}"
-        "-Dnanobind_DIR:PATH=${CUTILE_NANOBIND_DIR}"
-        "-DCMAKE_PROJECT_INCLUDE:FILEPATH=${CMAKE_CURRENT_LIST_DIR}/ExplicitLevelZeroInclude.cmake"
-        "-DCUTILE_LEVEL_ZERO_INCLUDE_DIR:PATH=${LevelZeroRuntime_INCLUDE_DIR}"
-        "-DLevelZeroRuntime_INCLUDE_DIR:PATH=${LevelZeroRuntime_INCLUDE_DIR}"
-        "-DLevelZeroRuntime_INCLUDE_DIRS:STRING=${LevelZeroRuntime_INCLUDE_DIR}"
-        "-DLevelZeroRuntime_LIBRARY:FILEPATH=${LevelZeroRuntime_LIBRARY}"
+    LIST_SEPARATOR "|"
+    CMAKE_ARGS ${_cutile_llvm_cmake_args}
     BUILD_COMMAND
         "${CMAKE_COMMAND}" --build "<BINARY_DIR>" --parallel
-        --target mlir_levelzero_runtime MLIRPythonModules MLIROptLib
+        --target ${_cutile_llvm_build_targets}
     INSTALL_COMMAND ""
-    BUILD_BYPRODUCTS
-        "${CUTILE_XPU_RUNTIME_PATH}"
-        "${CUTILE_XPU_MLIR_PYTHON_DIR}/mlir/ir.py"
-    BUILD_ALWAYS TRUE
+    ${_cutile_llvm_byproduct_args}
+    BUILD_ALWAYS ${_cutile_llvm_build_always}
     EXCLUDE_FROM_ALL TRUE
     USES_TERMINAL_DOWNLOAD TRUE
     USES_TERMINAL_CONFIGURE TRUE
     USES_TERMINAL_BUILD TRUE)
 
 ExternalProject_Add_StepDependencies(cutile_llvm download
-    "${_cutile_revision_file}")
+    "${_required_llvm_revisions_file}")
 
 ExternalProject_Add(cutile_tileir_to_mlir
-    PREFIX "${CMAKE_BINARY_DIR}/xpu-toolchain/tileir-to-mlir"
+    PREFIX "${CMAKE_BINARY_DIR}/tileir-toolchain/tileir-to-mlir"
     SOURCE_DIR "${_tileir_to_mlir_dir}"
     BINARY_DIR "${CUTILE_TILEIR_BINARY_DIR}"
     DOWNLOAD_COMMAND ""
@@ -171,15 +215,30 @@ ExternalProject_Add(cutile_tileir_to_mlir
 
 add_dependencies(cutile_tileir_to_mlir cutile_llvm)
 
-add_custom_target(cutile_xpu_toolchain)
-add_dependencies(cutile_xpu_toolchain cutile_llvm cutile_tileir_to_mlir)
+if(CUTILE_BUILD_VARIANT STREQUAL "xpu")
+    add_custom_target(cutile_xpu_toolchain)
+    add_dependencies(cutile_xpu_toolchain cutile_llvm cutile_tileir_to_mlir)
+else()
+    add_custom_target(cutile_cpu_prerequisites)
+    add_dependencies(cutile_cpu_prerequisites cutile_llvm cutile_tileir_to_mlir)
+endif()
 
-message(STATUS "LLVM revision: ${CUTILE_LLVM_REVISION}")
+if(_cutile_llvm_override)
+    message(STATUS "LLVM revision override: ${_cutile_llvm_override}")
+else()
+    message(STATUS "LLVM revision: newest required TileIR/Triton revision")
+endif()
 message(STATUS "LLVM source: ${CUTILE_LLVM_SOURCE_DIR}")
-message(STATUS "XPU: add to PYTHONPATH: ${CUTILE_XPU_MLIR_PYTHON_DIR}")
+if(CUTILE_BUILD_VARIANT STREQUAL "xpu")
+    message(STATUS "XPU: add to PYTHONPATH: ${CUTILE_XPU_MLIR_PYTHON_DIR}")
+endif()
 
 unset(_cutile_checkout_command)
 unset(_cutile_checkout_script)
-unset(_cutile_revision_file)
-unset(_cutile_llvm_pin)
+unset(_required_llvm_revisions_file)
+unset(_cutile_llvm_override)
+unset(_tileir_required_llvm_revision)
+unset(_tileir_required_llvm_revision_file)
+unset(_triton_required_llvm_revision)
+unset(_triton_required_llvm_revision_file)
 unset(_tileir_to_mlir_dir)

@@ -48,10 +48,16 @@ build = [
     "cmake>=3.24,<4",
     "ninja",
     "nanobind>=2.9,<3",
+    "pybind11>=2.13.1",
 ]
 
 [project.optional-dependencies]
-tileiras = [ "cuda-toolkit[tileiras,nvcc,nvvm]>=13.2,<13.4" ]
+cuda = [ "cuda-toolkit[tileiras,nvcc,nvvm]>=13.2,<13.4" ]
+cpu = [
+    "numpy",
+    "torch",
+    "triton",
+]
 xpu = [
     "numpy",
     "torch==2.13.0+xpu; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -76,6 +82,7 @@ include = [
     "cuda.tile._ir",
     "cuda.tile._passes",
     "cuda.tile._bytecode",
+    "cuda.tile._backend",
     "cuda.tile.tune",
     "cuda.tile.jax",
 ]
@@ -86,8 +93,13 @@ include = [
 
 [tool.uv]
 managed = true
-no-build-isolation-package = ["cuda-tile"]
+no-build-isolation-package = ["cuda-tile", "triton"]
 default-groups = ["build"]
+conflicts = [
+    [{ extra = "cuda" }, { extra = "cpu" }],
+    [{ extra = "cuda" }, { extra = "xpu" }],
+    [{ extra = "cpu" }, { extra = "xpu" }],
+]
 # Without this, uv derives a key from `packages.find.where` and stores it as an
 # mtime while comparing it as an inode, so it rebuilds on every sync.
 cache-keys = [
@@ -98,9 +110,16 @@ cache-keys = [
     { file = "cext/**" },
     { file = "xpu/**" },
     { file = "tileir-to-mlir/llvm-revision.txt" },
+    { env = "CUTILE_BUILD_VARIANT" },
+    { env = "CUDA_TILE_SKIP_CMAKE_BUILD" },
     { env = "CMAKE_ARGS" },
     { env = "USE_LLVM_REVISION" },
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-xpu"
@@ -108,5 +127,9 @@ url = "https://download.pytorch.org/whl/xpu"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-xpu" }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-xpu", extra = "xpu" },
+]
 triton-xpu = { index = "pytorch-xpu" }
+triton = { git = "https://github.com/intel-sandbox/users.fschlimb.triton-cpu", rev = "edad833879fd84b7f4bb9cf67b195725bcbd130b" }
