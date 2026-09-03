@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 import cuda.tile as ct
+from cuda.tile import _backend
 from cuda.tile._backend import cpu
 from cuda.tile._backend._signature import build_signature
 
@@ -100,6 +101,42 @@ def test_triton_cpu_preserves_nested_import_error(monkeypatch):
 
     with pytest.raises(ModuleNotFoundError, match=r"triton\._C"):
         cpu._triton_cpu()
+
+
+def test_backend_registration_discovers_compile_cache_key():
+    _backend.set_backend("cpu")
+    try:
+        assert _backend.get_compile_cache_key_fn() is cpu.compile_cache_key
+    finally:
+        _backend.clear_backend()
+
+
+def test_compile_cache_key_ignores_thread_count(monkeypatch):
+    backend = SimpleNamespace(
+        cpu_arch="x86_64", cpu_name="cpu", cpu_features={"feature"})
+    options = SimpleNamespace(hash=lambda: "options")
+    monkeypatch.setattr(
+        cpu, "_cpu_compiler",
+        lambda: (None, backend, options, None, None))
+    monkeypatch.setattr(
+        cpu, "_cpu_identity_modules",
+        lambda: (
+            "triton-version",
+            SimpleNamespace(__file__="/triton-compiler.py"),
+            SimpleNamespace(__file__="/libtriton.so"),
+            SimpleNamespace(_find_compiler=lambda language: "/cc"),
+            SimpleNamespace(build=SimpleNamespace(impl=None)),
+        ))
+    monkeypatch.setattr(cpu, "resolve_tool", lambda *_args: "/tool")
+    monkeypatch.setattr(
+        cpu, "file_fingerprint", lambda path: f"fingerprint:{path}")
+
+    with cpu.compile_options({"num_cpu_threads": 1}):
+        first = cpu.compile_cache_key()
+    with cpu.compile_options({"num_cpu_threads": 8}):
+        second = cpu.compile_cache_key()
+
+    assert first == second
 
 
 @pytest.mark.parametrize(

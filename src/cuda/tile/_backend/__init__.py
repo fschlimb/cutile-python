@@ -6,9 +6,10 @@
 cuTile normally compiles a kernel from TileIR bytecode into a CUDA cubin
 (see ``cuda.tile._compile.compile_tile``) and launches it through the CUDA
 driver in the C++ extension. To run on a different architecture you only need
-to provide two functions and register them once:
+to provide three functions and register them once:
 
 * ``compile_fn`` -- turns TileIR bytecode into an opaque backend binary.
+* ``compile_cache_key_fn`` -- identifies the compiler and effective options.
 * ``launch_fn``  -- executes a kernel on the backend.
 
 Everything else (parsing Python source to TileIR, building kernel signatures,
@@ -46,12 +47,18 @@ __all__ = ("set_backend", "clear_backend", "backend_active")
 #            signature: KernelSignature) -> bytes
 CompileFn = Callable[..., bytes]
 
+# compile_cache_key_fn() -> str | bytes | None
+CompileCacheKeyFn = Callable[[], str | bytes | None]
+
 # launch_fn(stream, grid, kernel, args: tuple) -> Any
 LaunchFn = Callable[..., Any]
+LaunchCompiledFn = Callable[..., Any]
 
 _lock = threading.RLock()
 _compile_fn: Optional[CompileFn] = None
+_compile_cache_key_fn: Optional[CompileCacheKeyFn] = None
 _launch_fn: Optional[LaunchFn] = None
+_launch_compiled_fn: Optional[LaunchCompiledFn] = None
 _sm_arch: Optional[str] = None
 _bytecode_version: Optional[str] = None
 
@@ -77,7 +84,9 @@ def _import_backend_module(module: str):
 
 def set_backend(module: Optional[str] = None, *,
                 compile_fn: Optional[CompileFn] = None,
+                compile_cache_key_fn: Optional[CompileCacheKeyFn] = None,
                 launch_fn: Optional[LaunchFn] = None,
+                launch_compiled_fn: Optional[LaunchCompiledFn] = None,
                 sm_arch: Optional[str] = None,
                 bytecode_version: Optional[str] = None) -> None:
     """Register custom backend hooks.
@@ -91,6 +100,9 @@ def set_backend(module: Optional[str] = None, *,
             ``compile_fn(tileir_bytecode, symbol=..., sm_arch=..., signature=...)``
             and must return ``bytes``. When ``None`` the default CUDA cubin
             compilation is used.
+        compile_cache_key_fn: Returns a deterministic ``str`` or ``bytes``
+            identifying all compiler inputs downstream of TileIR. Returning
+            ``None`` disables custom-backend compilation caching.
         launch_fn: Executes a kernel on the backend. Called as
             ``launch_fn(stream, grid, kernel, args)``. When ``None`` the default
             CUDA launch path (the C++ extension) is used.
@@ -100,24 +112,34 @@ def set_backend(module: Optional[str] = None, *,
             ``"13.1"``) to pin instead of probing the ``tileiras`` compiler.
             Useful when no CUDA toolkit is present.
     """
-    global _compile_fn, _launch_fn, _sm_arch, _bytecode_version
+    global _compile_fn, _compile_cache_key_fn, _launch_fn, _launch_compiled_fn
+    global _sm_arch, _bytecode_version
     if module is not None:
         mod = _import_backend_module(module)
-        compile_fn = compile_fn or getattr(mod, "compile_tileir", None)
+        if compile_fn is None:
+            compile_fn = getattr(mod, "compile_tileir", None)
+            if compile_cache_key_fn is None:
+                compile_cache_key_fn = getattr(
+                    mod, "compile_cache_key", None)
         launch_fn = launch_fn or getattr(mod, "launch", None)
+        launch_compiled_fn = launch_compiled_fn or getattr(
+            mod, "launch_compiled", None)
         sm_arch = sm_arch or getattr(mod, "sm_arch", None)
         bytecode_version = bytecode_version or getattr(mod, "bytecode_version", None)
 
     with _lock:
         _compile_fn = compile_fn
+        _compile_cache_key_fn = compile_cache_key_fn
         _launch_fn = launch_fn
+        _launch_compiled_fn = launch_compiled_fn
         _sm_arch = sm_arch
         _bytecode_version = bytecode_version
 
 
 def clear_backend() -> None:
     """Remove any registered backend hooks and restore the default CUDA path."""
-    set_backend(module=None, compile_fn=None, launch_fn=None, sm_arch=None,
+    set_backend(module=None, compile_fn=None, compile_cache_key_fn=None,
+                launch_fn=None, launch_compiled_fn=None, sm_arch=None,
                 bytecode_version=None)
 
 
@@ -130,8 +152,18 @@ def get_compile_fn() -> Optional[CompileFn]:
     return _compile_fn
 
 
+def get_compile_cache_key_fn() -> Optional[CompileCacheKeyFn]:
+    """Return the active custom compiler identity callback."""
+
+    return _compile_cache_key_fn
+
+
 def get_launch_fn() -> Optional[LaunchFn]:
     return _launch_fn
+
+
+def get_launch_compiled_fn() -> Optional[LaunchCompiledFn]:
+    return _launch_compiled_fn
 
 
 def get_sm_arch_override() -> Optional[str]:

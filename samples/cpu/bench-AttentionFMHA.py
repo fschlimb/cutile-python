@@ -10,6 +10,7 @@ from torch.nn.functional import scaled_dot_product_attention
 import numpy as np
 from cuda.tile import RoundingMode as RMd
 from cuda.tile._backend import cpu
+from utils.benchmark import report_benchmark
 
 
 ct.set_backend("cpu")
@@ -185,7 +186,7 @@ def cutile_fmha(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor,
         qk_scale = 1.0 / math.sqrt(D_k)
 
     # --- Create Output Tensor ---
-    Out = torch.empty((Batch, Heads, SeqLen_Q, D_v), dtype=Q.dtype, device=Q.device)
+    Out = torch.empty((Batch, Heads, SeqLen_Q, D_v), dtype=torch.float32, device=Q.device)
 
     # --- Calculate Grid Dimensions ---
     grid_x = math.ceil(SeqLen_Q / tile_m)
@@ -212,18 +213,13 @@ def cutile_fmha(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor,
 
 def torch_fmha(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor,
                is_causal: bool, enable_gqa: bool) -> torch.Tensor:
-    return scaled_dot_product_attention(Q, K, V,
-                                        is_causal=is_causal,
-                                        enable_gqa=enable_gqa)
+    return scaled_dot_product_attention(
+        Q, K, V, is_causal=is_causal, enable_gqa=enable_gqa
+    ).to(torch.float32)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--correctness-check",
-        action="store_true",
-        help="Check the correctness of the results",
-    )
     parser.add_argument("--num-cpu-threads", type=int, default=0)
     args = parser.parse_args()
     print("--- Running cuTile Fused Multi-Head Attention (FMHA) Sample ---")
@@ -233,12 +229,12 @@ if __name__ == "__main__":
     NUM_HEADS = 8
     SEQ_LEN_Q = 128
     SEQ_LEN_KV = 128
-    D_K = 64
-    D_V = 64
+    D_K = 32
+    D_V = 32
 
     QUERY_GROUP_SIZE = 1
 
-    DTYPE = torch.float16
+    DTYPE = torch.bfloat16
 
     Q_input = torch.randn(BATCH_SIZE, NUM_HEADS, SEQ_LEN_Q, D_K, dtype=DTYPE, device='cpu')
     K_input = torch.randn(BATCH_SIZE, NUM_HEADS // QUERY_GROUP_SIZE, SEQ_LEN_KV, D_K,
@@ -258,42 +254,73 @@ if __name__ == "__main__":
     print(f"Input K shape: {K_input.shape}")
     print(f"Input V shape: {V_input.shape}")
 
-    # Test 1: Non-Causal Attention
-    print("\n--- Test 1: Non-Causal Attention ---")
-    output_fmha_cutile_non_causal = cutile_fmha(
-        Q=Q_input, K=K_input, V=V_input,
-        tile_m=128, tile_n=128,  # Increased tile sizes
-        causal=False,
-        query_group_size=QUERY_GROUP_SIZE,
-        num_cpu_threads=args.num_cpu_threads
-    )
-    print(f"""cuTile FMHA Output shape (Non-Causal):{output_fmha_cutile_non_causal.shape},
-        dtype:{output_fmha_cutile_non_causal.dtype}""")
-    if args.correctness_check:
-        ref_fmha = torch_fmha(Q_input, K_input, V_input,
-                              is_causal=False, enable_gqa=False)
-        torch.testing.assert_close(output_fmha_cutile_non_causal, ref_fmha, atol=1e-3, rtol=1e-3)
-        print("Correctness check passed")
-    else:
-        print("Correctness check disabled")
+    # Test 3: Causal Attention performance benchmarking.
+    print("\n--- Test 3: Causal Attention performance benchmarking ---")
+    BATCH_SIZE = 2
+    NUM_HEADS = 8
+    SEQ_LEN_Q = 128
+    SEQ_LEN_KV = 128
+    D_K = 32
+    D_V = 32
+    QUERY_GROUP_SIZE = 1
+    TILE_M = 32
+    TILE_N = 32
 
-    # Test 2: Causal Attention
-    print("\n--- Test 2: Causal Attention ---")
+    Q_input = torch.randn(BATCH_SIZE, NUM_HEADS, SEQ_LEN_Q, D_K, dtype=DTYPE, device='cpu')
+    K_input = torch.randn(BATCH_SIZE, NUM_HEADS // QUERY_GROUP_SIZE, SEQ_LEN_KV, D_K,
+                          dtype=DTYPE, device='cpu')
+    V_input = torch.randn(BATCH_SIZE, NUM_HEADS // QUERY_GROUP_SIZE, SEQ_LEN_KV, D_V,
+                          dtype=DTYPE, device='cpu')
+
+    print("Benchmark configuration:")
+    print(f"Input Q shape: {Q_input.shape}")
+    print(f"Input K shape: {K_input.shape}")
+    print(f"Input V shape: {V_input.shape}")
+    print(f"Tile shape: ({TILE_M}, {TILE_N})")
     output_fmha_cutile_causal = cutile_fmha(
         Q=Q_input, K=K_input, V=V_input,
-        tile_m=128, tile_n=128,  # Increased tile sizes
+        tile_m=TILE_M, tile_n=TILE_N,
         causal=True,
         query_group_size=QUERY_GROUP_SIZE,
-        num_cpu_threads=args.num_cpu_threads
+        num_cpu_threads=args.num_cpu_threads,
     )
     print(f"""cuTile FMHA Output shape (Causal): {output_fmha_cutile_causal.shape},
             dtype: {output_fmha_cutile_causal.dtype}""")
-    if args.correctness_check:
-        ref_fmha = torch_fmha(Q_input, K_input, V_input,
-                              is_causal=True, enable_gqa=False)
-        torch.testing.assert_close(output_fmha_cutile_causal, ref_fmha, atol=1e-3, rtol=1e-3)
-        print("Correctness check passed")
-    else:
-        print("Correctness check disabled")
+    ref_fmha = torch_fmha(Q_input, K_input, V_input, is_causal=True, enable_gqa=False)
+    torch.testing.assert_close(
+        output_fmha_cutile_causal, ref_fmha, atol=1e-2, rtol=5e-2
+    )
+    print("Correctness check passed")
+
+    benchmark_output = torch.empty(
+        (BATCH_SIZE, NUM_HEADS, SEQ_LEN_Q, D_V),
+        dtype=DTYPE,
+        device=Q_input.device,
+    )
+    benchmark_grid = (
+        math.ceil(SEQ_LEN_Q / TILE_M), BATCH_SIZE * NUM_HEADS, 1)
+    stats_cutile = report_benchmark(
+        cutile_fmha,
+        (Q_input, K_input, V_input,
+         1.0 / math.sqrt(D_K), 0,
+         TILE_M, TILE_N,
+         QUERY_GROUP_SIZE, True, args.num_cpu_threads, fmha_kernel),
+        kernel=fmha_kernel,
+        grid=benchmark_grid,
+        kernel_args=(Q_input, K_input, V_input, benchmark_output,
+                     1.0 / math.sqrt(D_K), 0, D_K, NUM_HEADS,
+                     TILE_M, TILE_N, QUERY_GROUP_SIZE, True,
+                     (SEQ_LEN_KV % TILE_N) == 0),
+        options={"num_cpu_threads": args.num_cpu_threads, "assume_in_bounds": True},
+    )
+    stats_torch = report_benchmark(
+        torch_fmha,
+        (Q_input, K_input, V_input, True, False)
+    )
+    print("Benchmark results:")
+    print(f"  cuTile FMHA: {stats_cutile['mean_time_ms']:.5f} ms")
+    print(f"  torch FMHA: {stats_torch['mean_time_ms']:.5f} ms")
+    speedup = stats_torch["mean_time_ms"] / stats_cutile["mean_time_ms"]
+    print(f"Speedup: {speedup:.3f}x")
 
     print("\n--- cuTile Fused Multi-Head Attention (FMHA) Sample execution complete ---")

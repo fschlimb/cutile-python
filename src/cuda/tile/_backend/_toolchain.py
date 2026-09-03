@@ -1,12 +1,34 @@
 from __future__ import annotations
 
+import functools
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
 
 
-def build_tree_dir() -> str:
+@functools.lru_cache(maxsize=32)
+def _fingerprint_file(path: str, size: int, mtime_ns: int) -> str:
+    del size, mtime_ns
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def file_fingerprint(path: str) -> str:
+    """Return a content digest cached by canonical path, size, and mtime."""
+
+    resolved = os.path.realpath(path)
+    stat = os.stat(resolved)
+    return _fingerprint_file(resolved, stat.st_size, stat.st_mtime_ns)
+
+
+def buildtree_dir() -> str:
+    """Return the active or in-tree CMake build directory."""
+
     override = os.environ.get("CUDA_TILE_CEXT_BUILD_DIR")
     if override:
         return override
@@ -16,6 +38,8 @@ def build_tree_dir() -> str:
 
 
 def resolve_tool(backend: str, env_var: str, name: str) -> str:
+    """Resolve a backend tool from an override, PATH, or the build tree."""
+
     override = os.environ.get(env_var)
     candidate = override or name
     resolved = shutil.which(candidate)
@@ -24,7 +48,7 @@ def resolve_tool(backend: str, env_var: str, name: str) -> str:
     if override and os.path.isfile(override) and os.access(override, os.X_OK):
         return override
     if not override:
-        in_tree = os.path.join(build_tree_dir(), "llvm", "bin", name)
+        in_tree = os.path.join(buildtree_dir(), "llvm", "bin", name)
         if os.access(in_tree, os.X_OK):
             return in_tree
     source = f"{env_var}={override!r}" if override else f"$PATH (or set {env_var})"
@@ -33,6 +57,8 @@ def resolve_tool(backend: str, env_var: str, name: str) -> str:
 
 
 def run_tool(backend: str, argv: list[str], input_bytes: bytes) -> bytes:
+    """Run a backend tool with byte input and report captured failures."""
+
     try:
         process = subprocess.run(
             argv, input=input_bytes, stdout=subprocess.PIPE,

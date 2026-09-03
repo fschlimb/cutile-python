@@ -14,7 +14,12 @@ Select the backend and supply the mandatory tuning parameters::
         ct.launch(stream, grid, matmul_kernel, args)
 """
 import contextlib
+import functools
+import hashlib
+import importlib
+import json
 import os
+import shutil
 import sys
 import threading
 
@@ -23,8 +28,9 @@ import numpy as np
 import cuda.tile as ct
 from cuda.tile.compilation import KernelSignature, ScalarConstraint, ConstantConstraint
 
+from ._custom import compile_for_launch, normalize_dims
 from ._signature import build_signature
-from ._toolchain import resolve_tool, run_tool
+from ._toolchain import file_fingerprint, resolve_tool, run_tool
 
 
 from mlir import ir  # noqa: E402
@@ -157,11 +163,7 @@ def _launch_block(options: dict) -> tuple:
     return ((wg_m // sg_m) * (wg_n // sg_n) * _SUBGROUP_SIZE, 1, 1)
 
 
-def _triplet(value) -> tuple:
-    values = (value,) if isinstance(value, int) else tuple(value)
-    if not 1 <= len(values) <= 3:
-        raise ValueError("launch dimensions must have length 1 to 3")
-    return values + (1,) * (3 - len(values))
+_triplet = normalize_dims
 
 
 def _xeas_options(options: dict) -> dict:
@@ -170,6 +172,55 @@ def _xeas_options(options: dict) -> dict:
         "xegpu_op_level": options.get("xegpu_op_level", "workgroup"),
         "large_register_file": options.get("large_register_file", True),
     }
+
+
+@functools.lru_cache(maxsize=32)
+def _compile_cache_key_cached(block, assume_in_bounds, xegpu_op_level,
+                              large_register_file, tool, ocloc):
+    """Build the XPU compiler identity for normalized effective options."""
+
+    try:
+        mlir_native = importlib.import_module("mlir._mlir_libs._mlir")
+        identity = {
+            "schema": 1,
+            "sm_arch": sm_arch,
+            "block": block,
+            "assume_in_bounds": assume_in_bounds,
+            "xegpu_op_level": xegpu_op_level,
+            "large_register_file": large_register_file,
+            "tileir_to_mlir": file_fingerprint(tool),
+            "ocloc": file_fingerprint(ocloc),
+            "mlir": file_fingerprint(mlir_native.__file__),
+            "xeas": file_fingerprint(
+                os.path.join(os.path.dirname(__file__), "xeas.py")),
+            "cutile_xpu_backend": file_fingerprint(__file__),
+        }
+    except (ImportError, OSError, TypeError):
+        return None
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def compile_cache_key():
+    """Identify all XPU toolchain and option inputs affecting compilation."""
+
+    options = _current_options()
+    try:
+        tool = resolve_tool(
+            "XPU", "CUTILE_XPU_TILEIR_TO_MLIR", "tileir-to-mlir")
+        ocloc = shutil.which("ocloc")
+        if ocloc is None:
+            return None
+        xeas_options = _xeas_options(options)
+        return _compile_cache_key_cached(
+            _triplet(_launch_block(options)),
+            bool(options.get("assume_in_bounds", False)),
+            xeas_options["xegpu_op_level"],
+            xeas_options["large_register_file"],
+            os.path.realpath(tool), os.path.realpath(ocloc))
+    except (OSError, ValueError):
+        return None
 
 
 _torch = None
@@ -218,6 +269,7 @@ def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
     tool = resolve_tool("XPU", "CUTILE_XPU_TILEIR_TO_MLIR", "tileir-to-mlir")
     options = _current_options()
     mlir = _run_tileir_to_mlir(tool, tileir_bytecode, options)
+    # print(mlir)
     return xeas(mlir, **_xeas_options(options))
 
 
@@ -270,9 +322,15 @@ def launch(stream, grid, kernel, args):
     options = _current_options()
     block = _launch_block(options)
 
-    sig = build_signature(kernel, args)
     with _xe_context():
-        binary, _ = ct.compile_kernel(kernel, sig)
+        compiled = compile_for_launch(kernel, args)
+    return launch_compiled(stream, grid, compiled, args)
+
+
+def launch_compiled(stream, grid, compiled, args):
+    """Launch a previously compiled binary without compilation/cache lookup."""
+    sig = compiled.signature
+    binary = compiled.binary
 
     runtime_args = _runtime_kernel_args(sig, args)
 

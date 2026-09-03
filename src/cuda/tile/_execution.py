@@ -5,6 +5,8 @@
 from __future__ import annotations
 import dataclasses
 import functools
+import sys
+import threading
 from types import FunctionType
 from typing import TYPE_CHECKING
 
@@ -18,6 +20,19 @@ if TYPE_CHECKING:
     from cuda.tile.compilation import KernelSignature
 
 __all__ = ("function", "kernel", "stub", "launch", "compile_kernel")
+
+_custom_cache_warning_lock = threading.Lock()
+_custom_cache_warnings = set()
+
+
+def _warn_custom_cache_unavailable(reason: str) -> None:
+    """Report each reason for disabling custom compilation caching once."""
+
+    with _custom_cache_warning_lock:
+        if reason in _custom_cache_warnings:
+            return
+        _custom_cache_warnings.add(reason)
+    print(f"cuTile custom backend cache unavailable: {reason}", file=sys.stderr)
 
 
 ###############################################################################
@@ -124,6 +139,61 @@ class kernel(TileDispatcher):
                          ann_func.int64_parameter_mask)
         self._annotated_function = ann_func
         self._compiler_options = compiler_options
+        self._custom_compile_cache = {}
+        self._custom_compile_lock = threading.RLock()
+
+    def _compile_custom_cached(self, signature, context, compile_fn,
+                               compiler_identity, sm_arch, bytecode_version):
+        """Compile a custom specialization through its memory and disk caches."""
+
+        from cuda.tile._cache import cache_key, cache_lookup, cache_store, evict_lru
+        from cuda.tile._compile import compile_tile
+
+        signature_identity = signature.with_symbol(None).with_mangled_symbol(
+            self._annotated_function.pyfunc.__name__).symbol
+        memory_key = (
+            id(context), id(compile_fn), compiler_identity, sm_arch,
+            bytecode_version or "", signature_identity,
+        )
+        cached = self._custom_compile_cache.get(memory_key)
+        if cached is not None:
+            return cached
+
+        result = compile_tile(
+            self._annotated_function, (signature,), sm_arch,
+            self._compiler_options, context,
+            bytecode_version=bytecode_version,
+            return_bytecode=True, return_cubin=False)
+        [kernel_sig] = result.kernel_signatures
+        bytecode = bytes(result.bytecode)
+
+        config = context.config
+        disk_key = None
+        binary = None
+        if config.cache_dir is not None:
+            identity = (compiler_identity.encode()
+                        if isinstance(compiler_identity, str)
+                        else compiler_identity)
+            compiler_version = "custom-backend-v1:" + identity.hex()
+            opt_level = self._compiler_options.opt_level_for_target(sm_arch)
+            disk_key = cache_key(
+                compiler_version, sm_arch, opt_level, bytecode, False)
+            binary = cache_lookup(config.cache_dir, disk_key)
+
+        if binary is None:
+            binary = compile_fn(
+                bytecode, symbol=kernel_sig.symbol, sm_arch=sm_arch,
+                signature=kernel_sig)
+            if not isinstance(binary, bytes):
+                raise TypeError(
+                    "Custom backend compile_tileir() must return bytes")
+            if config.cache_dir is not None and disk_key is not None:
+                cache_store(config.cache_dir, disk_key, binary)
+                evict_lru(config.cache_dir, config.cache_size_limit)
+
+        compiled = binary, kernel_sig.symbol, None, []
+        self._custom_compile_cache[memory_key] = compiled
+        return compiled
 
     def _compile(self, signature: KernelSignature, context: TileContext):
         from cuda.tile._compile import compile_tile, get_sm_arch, parse_bytecode_version
@@ -132,10 +202,31 @@ class kernel(TileDispatcher):
         sm_arch = _backend.get_sm_arch_override() or get_sm_arch()
         compile_fn = _backend.get_compile_fn()
         if compile_fn is not None:
-            # Custom backend: compile to TileIR bytecode and let the hook turn
-            # it into a backend binary instead of a CUDA cubin.
             bc_ver = _backend.get_bytecode_version_override()
             bytecode_version = parse_bytecode_version(bc_ver) if bc_ver else None
+            if signature.symbol is None:
+                signature = signature.with_mangled_symbol(
+                    self._annotated_function.pyfunc.__name__)
+
+            cache_key_fn = _backend.get_compile_cache_key_fn()
+            if cache_key_fn is None:
+                _warn_custom_cache_unavailable(
+                    "backend does not provide compile_cache_key()")
+                compiler_identity = None
+            else:
+                compiler_identity = cache_key_fn()
+                if compiler_identity is None:
+                    _warn_custom_cache_unavailable(
+                        "backend could not determine its compiler identity")
+            if compiler_identity is not None:
+                if not isinstance(compiler_identity, str | bytes):
+                    raise TypeError(
+                        "compile_cache_key() must return str, bytes, or None")
+                with self._custom_compile_lock:
+                    return self._compile_custom_cached(
+                        signature, context, compile_fn, compiler_identity,
+                        sm_arch, bytecode_version)
+
             result = compile_tile(self._annotated_function, (signature,),
                                   sm_arch, self._compiler_options, context,
                                   bytecode_version=bytecode_version,
@@ -231,6 +322,20 @@ def compile_kernel(kernel: "kernel",
     """
     binary, symbol, _dyn_smem, _tensor_maps = kernel._compile(signature, context)
     return binary, symbol
+
+
+def compile_kernel_for_launch(kernel, kernel_args):
+    """Resolve a custom-backend binary for concrete runtime arguments."""
+    from cuda.tile._backend._custom import compile_for_launch
+
+    return compile_for_launch(kernel, kernel_args)
+
+
+def launch_compiled(stream, grid, compiled, kernel_args, /):
+    """Launch a binary returned by :func:`compile_kernel_for_launch`."""
+    from cuda.tile._backend._custom import launch_compiled as _launch_compiled
+
+    return _launch_compiled(stream, grid, compiled, kernel_args)
 
 
 def launch(stream, grid, kernel, kernel_args, /):

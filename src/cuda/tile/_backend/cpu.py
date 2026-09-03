@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
+import importlib
+import importlib.metadata
 import importlib.util
+import json
 import os
 import platform
+import shutil
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -12,8 +17,9 @@ from types import SimpleNamespace
 import cuda.tile as ct
 from cuda.tile.compilation import ArrayConstraint, ConstantConstraint, ScalarConstraint
 
-from ._signature import array_metadata, build_signature
-from ._toolchain import resolve_tool, run_tool
+from ._custom import compile_for_launch, normalize_dims
+from ._signature import array_metadata
+from ._toolchain import file_fingerprint, resolve_tool, run_tool
 
 
 sm_arch = "3000"
@@ -45,11 +51,115 @@ def _triton_cpu():
         raise ImportError(
             "CPU backend requires the 'cpu' extra; run "
             "scripts/sync-backend.sh cpu")
-    from triton._C.libtriton import ir
-    from triton.backends.compiler import GPUTarget
-    from triton.backends.cpu.compiler import CPUBackend
-    from triton.backends.cpu.driver import CPULauncher, CPUUtils
-    return ir, GPUTarget, CPUBackend, CPULauncher, CPUUtils
+    libtriton = importlib.import_module("triton._C.libtriton")
+    compiler = importlib.import_module("triton.backends.compiler")
+    cpu_compiler = importlib.import_module("triton.backends.cpu.compiler")
+    cpu_driver = importlib.import_module("triton.backends.cpu.driver")
+    return (libtriton.ir, compiler.GPUTarget, cpu_compiler.CPUBackend,
+            cpu_driver.CPULauncher, cpu_driver.CPUUtils)
+
+
+@functools.lru_cache(maxsize=1)
+def _cpu_backend():
+    """Return the process-local Triton CPU backend and launcher APIs."""
+
+    ir, GPUTarget, CPUBackend, CPULauncher, CPUUtils = _triton_cpu()
+    backend = CPUBackend(GPUTarget("cpu", platform.machine(), 0))
+    return ir, backend, CPULauncher, CPUUtils
+
+
+def _cpu_compiler():
+    """Return the CPU backend with its current compile-time options."""
+
+    ir, backend, CPULauncher, CPUUtils = _cpu_backend()
+    options = backend.parse_options({
+        "assume_in_bounds": _ASSUME_IN_BOUNDS,
+    })
+    return ir, backend, options, CPULauncher, CPUUtils
+
+
+@functools.lru_cache(maxsize=1)
+def _cpu_identity_modules():
+    """Load stable Triton modules used to identify generated CPU binaries."""
+
+    return (
+        importlib.metadata.version("triton"),
+        importlib.import_module("triton.backends.cpu.compiler"),
+        importlib.import_module("triton._C.libtriton"),
+        importlib.import_module("triton.runtime.build"),
+        importlib.import_module("triton.knobs"),
+    )
+
+
+@functools.lru_cache(maxsize=16)
+def _compile_cache_key_cached(environment):
+    """Build the CPU compiler identity for one compile environment."""
+
+    try:
+        _ir, backend, options, _CPULauncher, _CPUUtils = _cpu_compiler()
+        (triton_version, triton_cpu_compiler, libtriton,
+         triton_build, triton_knobs) = _cpu_identity_modules()
+        if triton_knobs.build.impl is not None:
+            return None
+        triton_library_dir = os.path.dirname(libtriton.__file__)
+        compiler = triton_build._find_compiler("c")
+        compiler = shutil.which(compiler) or compiler
+        llvm_pass_plugin = os.environ.get("LLVM_PASS_PLUGIN_PATH")
+
+        tool = resolve_tool(
+            "CPU", "CUTILE_CPU_TILEIR_TO_MLIR", "tileir-to-mlir")
+        identity = {
+            "schema": 1,
+            "triton_version": triton_version,
+            "triton_library_dir": os.path.realpath(triton_library_dir),
+            "libtriton": file_fingerprint(libtriton.__file__),
+            "cpu_runtime": file_fingerprint(os.path.join(
+                triton_library_dir, "libTritonCPURuntime.so")),
+            "sleef": file_fingerprint(os.path.join(
+                triton_library_dir, "libsleef.so")),
+            "triton_cpu_compiler": file_fingerprint(
+                triton_cpu_compiler.__file__),
+            "cutile_cpu_backend": file_fingerprint(__file__),
+            "tileir_to_mlir": file_fingerprint(tool),
+            "cpu_arch": backend.cpu_arch,
+            "cpu_name": backend.cpu_name,
+            "cpu_features": sorted(backend.cpu_features),
+            "platform": platform.platform(),
+            "libc": platform.libc_ver(),
+            "host_compiler_path": os.path.realpath(compiler),
+            "host_compiler": file_fingerprint(compiler),
+            "options": options.hash(),
+            "environment": environment,
+            "llvm_pass_plugin": (
+                file_fingerprint(llvm_pass_plugin)
+                if llvm_pass_plugin else None),
+        }
+    except (AttributeError, ImportError, OSError, TypeError):
+        return None
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def compile_cache_key():
+    """Identify all CPU toolchain and option inputs affecting compilation."""
+
+    try:
+        *_modules, triton_knobs = _cpu_identity_modules()
+    except (AttributeError, ImportError, OSError, TypeError):
+        return None
+    if triton_knobs.build.impl is not None:
+        return None
+    environment = tuple(os.environ.get(name) for name in (
+        "TRITON_CPU_FAST_MATH",
+        "TRITON_CPU_UKERNELS_LIB",
+        "TRITON_CPU_DOT_PROD_HORIZ_SUM",
+        "TRITON_DISABLE_LINE_INFO",
+        "DISABLE_LLVM_OPT",
+        "LLVM_PASS_PLUGIN_PATH",
+        "TRITON_ENABLE_ASAN",
+    ))
+    return _compile_cache_key_cached(environment)
 
 
 def _lower_tileir(bytecode: bytes) -> bytes:
@@ -75,12 +185,7 @@ def _lower_tileir(bytecode: bytes) -> bytes:
 
 def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
     del symbol, sm_arch, signature
-    ir, GPUTarget, CPUBackend, _CPULauncher, _CPUUtils = _triton_cpu()
-    target = GPUTarget("cpu", platform.machine(), 0)
-    backend = CPUBackend(target)
-    options = backend.parse_options({
-        "assume_in_bounds": _ASSUME_IN_BOUNDS,
-    })
+    ir, backend, options, _CPULauncher, _CPUUtils = _cpu_compiler()
     context = ir.context()
     ir.load_dialects(context)
     backend.load_dialects(context)
@@ -134,11 +239,7 @@ def _flatten_arguments(signature, arguments):
     return values, {index: value for index, value in enumerate(types)}
 
 
-def _triplet(grid) -> tuple[int, int, int]:
-    values = (grid,) if isinstance(grid, int) else tuple(grid)
-    if not 1 <= len(values) <= 3:
-        raise ValueError("launch dimensions must have length 1 to 3")
-    return values + (1,) * (3 - len(values))
+_triplet = normalize_dims
 
 
 def launch(stream, grid, kernel, args):
@@ -148,8 +249,15 @@ def launch(stream, grid, kernel, args):
             raise TypeError("CPU backend stream must be None, zero, or synchronizable")
         synchronize()
 
-    signature = build_signature(kernel, args)
-    binary, symbol = ct.compile_kernel(kernel, signature)
+    compiled = compile_for_launch(kernel, args)
+    return launch_compiled(stream, grid, compiled, args)
+
+
+def launch_compiled(stream, grid, compiled, args):
+    """Launch a previously compiled binary without compilation/cache lookup."""
+    signature = compiled.signature
+    binary = compiled.binary
+    symbol = compiled.symbol
     values, triton_signature = _flatten_arguments(signature, args)
     _ir, _target, _backend, CPULauncher, CPUUtils = _triton_cpu()
     key = (hashlib.sha256(binary).digest(), symbol,

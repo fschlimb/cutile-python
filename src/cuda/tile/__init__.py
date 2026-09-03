@@ -173,6 +173,8 @@ from cuda.tile._execution import (
     kernel,
     launch,
     compile_kernel,
+    compile_kernel_for_launch,
+    launch_compiled,
 )
 
 import cuda.tile.compilation as compilation
@@ -180,6 +182,8 @@ import cuda.tile.compilation as compilation
 __all__ = [
     "launch",
     "compile_kernel",
+    "compile_kernel_for_launch",
+    "launch_compiled",
     "set_backend",
     "clear_backend",
     "backend_active",
