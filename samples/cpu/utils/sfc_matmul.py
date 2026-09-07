@@ -4,10 +4,13 @@
 import functools
 import threading
 from contextlib import nullcontext
+from dataclasses import replace
 
 import cuda.tile as ct
 import torch
 from cuda.tile._backend import cpu
+from cuda.tile._backend._signature import build_signature
+from cuda.tile.compilation import ArrayConstraint, KernelSignature
 
 
 ct.set_backend("cpu")
@@ -136,6 +139,32 @@ def _get_accum_dtype(torch_dtype):
     if torch_dtype == torch.int8:
         return torch.int32
     raise ValueError(f"Unsupported dtype: {torch_dtype}")
+
+
+def _build_matmul_signature(kernel, kernel_args):
+    signature = build_signature(kernel, kernel_args)
+    if not kernel_args[14]:  # B_IS_PREPACKED
+        return signature
+
+    vnni = kernel_args[10]
+    packed_b = kernel_args[1]
+    packed_b_strides = (
+        None,
+        _BLOCK_SIZE_K * _BLOCK_SIZE_N,
+        _BLOCK_SIZE_N * vnni,
+        vnni,
+        1,
+    )
+    if (packed_b.ndim != len(packed_b_strides) or
+            tuple(packed_b.stride())[1:] != packed_b_strides[1:]):
+        return signature
+
+    parameters = list(signature.parameters)
+    b_constraint = parameters[1]
+    assert isinstance(b_constraint, ArrayConstraint)
+    parameters[1] = replace(b_constraint, stride_constant=packed_b_strides)
+    signature = KernelSignature(parameters, signature.calling_convention)
+    return signature.with_mangled_symbol(kernel._annotated_function.pyfunc.__name__)
 
 
 @_thread_lru_cache()
@@ -542,7 +571,11 @@ def prepare_sfc_matmul(
             launches.append(
                 (
                     (blocks_m * blocks_n, 1, 1),
-                    ct.compile_kernel_for_launch(matmul_kernel, kernel_args),
+                    cpu.compile_for_launch(
+                        matmul_kernel,
+                        kernel_args,
+                        signature_builder=_build_matmul_signature,
+                    ),
                     kernel_args,
                 )
             )

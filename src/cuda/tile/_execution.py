@@ -140,6 +140,7 @@ class kernel(TileDispatcher):
         self._annotated_function = ann_func
         self._compiler_options = compiler_options
         self._custom_compile_cache = {}
+        self._launch_signature_cache = {}
         self._custom_compile_lock = threading.RLock()
 
     def _compile_custom_cached(self, signature, context, compile_fn,
@@ -149,8 +150,8 @@ class kernel(TileDispatcher):
         from cuda.tile._cache import cache_key, cache_lookup, cache_store, evict_lru
         from cuda.tile._compile import compile_tile
 
-        signature_identity = signature.with_symbol(None).with_mangled_symbol(
-            self._annotated_function.pyfunc.__name__).symbol
+        signature_identity = signature.mangled_symbol(
+            self._annotated_function.pyfunc.__name__)
         memory_key = (
             id(context), id(compile_fn), compiler_identity, sm_arch,
             bytecode_version or "", signature_identity,

@@ -18,14 +18,10 @@ from .._cext import CallingConvention
 
 def mangle_kernel_name(function_name: str,
                        kernel_signature: KernelSignature) -> str:
-    alias_group_map, alias_group_names = _map_alias_groups(kernel_signature.parameters)
+    alias_group_map, _ = _map_alias_groups(kernel_signature.parameters)
     ret = (function_name + f"_K{kernel_signature.calling_convention.code}"
            + "".join("_" + _mangle_constraint(p, alias_group_map)
                      for p in kernel_signature.parameters))
-    parsed_function_name, parsed_sig = _demangle_kernel_name(ret, alias_group_names)
-    assert function_name == parsed_function_name
-    assert kernel_signature.parameters == parsed_sig.parameters, \
-        f"Failed to round-trip mangled name {ret}"
     return ret
 
 

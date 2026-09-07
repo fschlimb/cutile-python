@@ -5,6 +5,7 @@
 import pytest
 
 from cuda.tile.compilation import mangle_kernel_name, demangle_kernel_name
+from cuda.tile.compilation._name_mangling import _demangle_kernel_name, _map_alias_groups
 from cuda.tile.compilation import (KernelSignature, ScalarConstraint, ArrayConstraint,
                                    ListConstraint, CallingConvention)
 from cuda.tile._datatype import (bool_, uint8, uint16, uint32, uint64, int8, int16, int32, int64,
@@ -175,10 +176,13 @@ def test_name_mangling_cutile_python_v1(parameters, expected_suffix):
     cconv = CallingConvention.cutile_python_v1()
     sig = KernelSignature(parameters, cconv)
     expected = func_name + "_K" + cconv.code + expected_suffix
-    # mangle_kernel_name internally round-trips through demangle and asserts
-    # equality, so we only need to check the mangled string here.
     mangled = mangle_kernel_name(func_name, sig)
     assert mangled == expected, f"Expected {expected!r}, got {mangled!r}"
-    # Also verify that the public demangle_kernel_name doesn't crash.
     demangled_name, demangled_sig = demangle_kernel_name(mangled)
     assert demangled_name == func_name
+    # The public demangler invents alias group names, so round-trip through the
+    # internal one, which restores the original ones.
+    _, alias_group_names = _map_alias_groups(sig.parameters)
+    demangled_name, demangled_sig = _demangle_kernel_name(mangled, alias_group_names)
+    assert demangled_name == func_name
+    assert demangled_sig.parameters == sig.parameters
