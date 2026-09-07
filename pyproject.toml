@@ -132,4 +132,4 @@ torch = [
     { index = "pytorch-xpu", extra = "xpu" },
 ]
 triton-xpu = { index = "pytorch-xpu" }
-triton = { git = "https://github.com/intel-sandbox/users.fschlimb.triton-cpu", rev = "edad833879fd84b7f4bb9cf67b195725bcbd130b" }
+triton = { git = "https://github.com/intel-sandbox/users.fschlimb.triton-cpu", rev = "c2809d44ac5ae6e165244b2a24fc55df78253f4e" }

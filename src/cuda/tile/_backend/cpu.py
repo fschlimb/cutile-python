@@ -28,8 +28,13 @@ bytecode_version = "13.3"
 _tls = threading.local()
 _cache_lock = threading.Lock()
 _launch_cache = {}
-_ASSUME_IN_BOUNDS = os.environ.get(
-    "CUTILE_CPU_ASSUME_IN_BOUNDS", "0").lower() in ("1", "on", "true", "yes")
+
+
+def _assume_in_bounds():
+    value = os.environ.get("CUTILE_CPU_ASSUME_IN_BOUNDS")
+    if value is not None:
+        return value.lower() in ("1", "on", "true", "yes")
+    return _current_options().get("assume_in_bounds", False)
 
 
 @contextlib.contextmanager
@@ -68,12 +73,12 @@ def _cpu_backend():
     return ir, backend, CPULauncher, CPUUtils
 
 
-def _cpu_compiler():
+def _cpu_compiler(assume_in_bounds):
     """Return the CPU backend with its current compile-time options."""
 
     ir, backend, CPULauncher, CPUUtils = _cpu_backend()
     options = backend.parse_options({
-        "assume_in_bounds": _ASSUME_IN_BOUNDS,
+        "assume_in_bounds": assume_in_bounds,
     })
     return ir, backend, options, CPULauncher, CPUUtils
 
@@ -92,11 +97,12 @@ def _cpu_identity_modules():
 
 
 @functools.lru_cache(maxsize=16)
-def _compile_cache_key_cached(environment):
+def _compile_cache_key_cached(environment, assume_in_bounds):
     """Build the CPU compiler identity for one compile environment."""
 
     try:
-        _ir, backend, options, _CPULauncher, _CPUUtils = _cpu_compiler()
+        _ir, backend, options, _CPULauncher, _CPUUtils = _cpu_compiler(
+            assume_in_bounds)
         (triton_version, triton_cpu_compiler, libtriton,
          triton_build, triton_knobs) = _cpu_identity_modules()
         if triton_knobs.build.impl is not None:
@@ -144,6 +150,7 @@ def _compile_cache_key_cached(environment):
 def compile_cache_key():
     """Identify all CPU toolchain and option inputs affecting compilation."""
 
+    assume_in_bounds = _assume_in_bounds()
     try:
         *_modules, triton_knobs = _cpu_identity_modules()
     except (AttributeError, ImportError, OSError, TypeError):
@@ -159,12 +166,12 @@ def compile_cache_key():
         "LLVM_PASS_PLUGIN_PATH",
         "TRITON_ENABLE_ASAN",
     ))
-    return _compile_cache_key_cached(environment)
+    return _compile_cache_key_cached(environment, assume_in_bounds)
 
 
 def _lower_tileir(bytecode: bytes) -> bytes:
     tool = resolve_tool("CPU", "CUTILE_CPU_TILEIR_TO_MLIR", "tileir-to-mlir")
-    assume_in_bounds = str(_ASSUME_IN_BOUNDS).lower()
+    assume_in_bounds = str(_assume_in_bounds()).lower()
     argv = [
         tool,
         "--tileir-to-mlir-pipeline="
@@ -175,6 +182,7 @@ def _lower_tileir(bytecode: bytes) -> bytes:
         "--cse",
         "--canonicalize",
     ]
+    print(argv)
     output = run_tool("CPU", argv, bytecode)
     dump = os.environ.get("CUTILE_CPU_DUMP_MLIR")
     if dump:
@@ -185,7 +193,8 @@ def _lower_tileir(bytecode: bytes) -> bytes:
 
 def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
     del symbol, sm_arch, signature
-    ir, backend, options, _CPULauncher, _CPUUtils = _cpu_compiler()
+    ir, backend, options, _CPULauncher, _CPUUtils = _cpu_compiler(
+        _assume_in_bounds())
     context = ir.context()
     ir.load_dialects(context)
     backend.load_dialects(context)

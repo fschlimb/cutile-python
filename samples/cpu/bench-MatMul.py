@@ -21,7 +21,7 @@ if __name__ == "__main__":
     prepared = prepare_sfc_matmul(
         A,
         B,
-        options={"num_cpu_threads": args.num_cpu_threads},
+        options={"assume_in_bounds": True},
     )
     torch.testing.assert_close(
         prepared(), torch.matmul(A, B), atol=1e-2, rtol=1e-2)
