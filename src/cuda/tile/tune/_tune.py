@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+from contextlib import nullcontext
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Sequence, TypeVar
+from typing import Any, Callable, ContextManager, Generic, Sequence, TypeVar
 
 from cuda.tile._cext import (
     _benchmark,
@@ -121,6 +122,17 @@ def _in_terminal() -> bool:
         return False
 
 
+def _timing_fns(benchmark_fn=None):
+    from cuda.tile import _backend
+
+    if benchmark_fn is not None:
+        return benchmark_fn, lambda: None
+    benchmark = _backend.get_benchmark_fn()
+    if benchmark is not None:
+        return benchmark, lambda: None
+    return _benchmark, _synchronize_context
+
+
 def exhaustive_search(
     search_space: Sequence[T],
     stream,
@@ -129,18 +141,24 @@ def exhaustive_search(
     args_fn: Callable[[T], tuple[Any, ...]],
     hints_fn: Callable[[T], dict[str, Any]] | None = None,
     *,
-    quiet: bool = False
+    quiet: bool = False,
+    benchmark_fn: Callable[..., float] | None = None,
+    context_fn: Callable[[T], ContextManager[Any]] | None = None,
 ) -> TuningResult[T]:
     """Searches the entire search space and return the best configuration.
 
     Args:
         search_space: Sequence of configs to evaluate.
-        stream: The CUDA stream to execute kernel on.
+        stream: The stream accepted by the active backend, or ``None`` for CPU.
         grid_fn: Maps a config to grid dimensions.
         kernel: The kernel to tune.
         args_fn: Maps a config to kernel arguments for timing.
         hints_fn: Maps a config to compiler hints. Default: no hints.
         quiet: If true, avoid printing any progress or result.
+        benchmark_fn: Optional timing callback with the same signature as a
+            backend benchmark hook. Use this for non-kernel tuning targets.
+        context_fn: Optional context manager factory scoped around each
+            configuration's preparation and timing.
 
 
     Returns:
@@ -233,14 +251,19 @@ def exhaustive_search(
         if not quiet and isatty:
             progress(i, total, len(errors))
 
-        grid = grid_fn(cfg)
-        hints = hints_fn(cfg) if hints_fn is not None else {}
-        updated_kernel = kernel.replace_hints(**hints)
         try:
-            avg_us, error_bar, repeats = _time_us(
-                stream, grid, updated_kernel,
-                lambda _cfg=cfg: args_fn(_cfg),
-            )
+            with (context_fn(cfg) if context_fn is not None else nullcontext()):
+                grid = grid_fn(cfg)
+                hints = hints_fn(cfg) if hints_fn is not None else {}
+                updated_kernel = (
+                    kernel.replace_hints(**hints) if kernel is not None else None)
+                timing_kwargs = {} if benchmark_fn is None else {
+                    "benchmark_fn": benchmark_fn}
+                avg_us, error_bar, repeats = _time_us(
+                    stream, grid, updated_kernel,
+                    lambda _cfg=cfg: args_fn(_cfg),
+                    **timing_kwargs,
+                )
         except Exception as e:
             err_type = type(e).__name__
             msg = str(e)
@@ -279,21 +302,22 @@ _MAX_REPEATS = 1000
 _WARM_UP_STEPS = 10
 
 
-def _time_us(stream, grid, kernel, get_args) -> tuple[float, float, int]:
-    _synchronize_context()
+def _time_us(stream, grid, kernel, get_args, *, benchmark_fn=None) -> tuple[float, float, int]:
+    benchmark, synchronize = _timing_fns(benchmark_fn)
+    synchronize()
 
     # Warmup
     for _ in range(_WARM_UP_STEPS):
-        _benchmark(stream, grid, kernel, get_args())
+        benchmark(stream, grid, kernel, get_args())
 
-    _synchronize_context()
+    synchronize()
 
     repeats = 0
     running_mean = 0
     m2 = 0
     while True:
         repeats += 1
-        t = _benchmark(stream, grid, kernel, get_args())
+        t = benchmark(stream, grid, kernel, get_args())
         # Welford algorithm for running mean and variance
         old_mean = running_mean
         running_mean += (t - old_mean) / repeats

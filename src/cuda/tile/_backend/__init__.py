@@ -6,11 +6,14 @@
 cuTile normally compiles a kernel from TileIR bytecode into a CUDA cubin
 (see ``cuda.tile._compile.compile_tile``) and launches it through the CUDA
 driver in the C++ extension. To run on a different architecture you only need
-to provide three functions and register them once:
+to provide the core hooks and register them once:
 
 * ``compile_fn`` -- turns TileIR bytecode into an opaque backend binary.
 * ``compile_cache_key_fn`` -- identifies the compiler and effective options.
 * ``launch_fn``  -- executes a kernel on the backend.
+* ``benchmark_fn`` -- measures one synchronous kernel launch.
+* ``benchmark_callable_fn`` -- measures a synchronous host callable.
+* ``compile_options_fn`` -- scopes backend compile and launch options.
 
 Everything else (parsing Python source to TileIR, building kernel signatures,
 caching) is reused unchanged.
@@ -39,7 +42,7 @@ from __future__ import annotations
 
 import importlib
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, ContextManager, Optional
 
 __all__ = ("set_backend", "clear_backend", "backend_active")
 
@@ -53,12 +56,18 @@ CompileCacheKeyFn = Callable[[], str | bytes | None]
 # launch_fn(stream, grid, kernel, args: tuple) -> Any
 LaunchFn = Callable[..., Any]
 LaunchCompiledFn = Callable[..., Any]
+BenchmarkFn = Callable[..., float]
+BenchmarkCallableFn = Callable[..., float]
+CompileOptionsFn = Callable[[dict[str, Any]], ContextManager[Any]]
 
 _lock = threading.RLock()
 _compile_fn: Optional[CompileFn] = None
 _compile_cache_key_fn: Optional[CompileCacheKeyFn] = None
 _launch_fn: Optional[LaunchFn] = None
 _launch_compiled_fn: Optional[LaunchCompiledFn] = None
+_benchmark_fn: Optional[BenchmarkFn] = None
+_benchmark_callable_fn: Optional[BenchmarkCallableFn] = None
+_compile_options_fn: Optional[CompileOptionsFn] = None
 _sm_arch: Optional[str] = None
 _bytecode_version: Optional[str] = None
 
@@ -87,6 +96,9 @@ def set_backend(module: Optional[str] = None, *,
                 compile_cache_key_fn: Optional[CompileCacheKeyFn] = None,
                 launch_fn: Optional[LaunchFn] = None,
                 launch_compiled_fn: Optional[LaunchCompiledFn] = None,
+                benchmark_fn: Optional[BenchmarkFn] = None,
+                benchmark_callable_fn: Optional[BenchmarkCallableFn] = None,
+                compile_options_fn: Optional[CompileOptionsFn] = None,
                 sm_arch: Optional[str] = None,
                 bytecode_version: Optional[str] = None) -> None:
     """Register custom backend hooks.
@@ -106,6 +118,12 @@ def set_backend(module: Optional[str] = None, *,
         launch_fn: Executes a kernel on the backend. Called as
             ``launch_fn(stream, grid, kernel, args)``. When ``None`` the default
             CUDA launch path (the C++ extension) is used.
+        benchmark_fn: Measures one synchronous kernel launch. Called as
+            ``benchmark_fn(stream, grid, kernel, args)`` and returns microseconds.
+        benchmark_callable_fn: Measures a synchronous host callable. Called as
+            ``benchmark_callable_fn(stream, callable, args)`` and returns microseconds.
+        compile_options_fn: Returns a context manager that scopes backend
+            compile and launch options. Called as ``compile_options_fn(options)``.
         sm_arch: Optional target string passed to the compiler instead of
             probing a local CUDA device. Useful when no NVIDIA GPU is present.
         bytecode_version: Optional TileIR bytecode version string (for example
@@ -113,6 +131,7 @@ def set_backend(module: Optional[str] = None, *,
             Useful when no CUDA toolkit is present.
     """
     global _compile_fn, _compile_cache_key_fn, _launch_fn, _launch_compiled_fn
+    global _benchmark_fn, _benchmark_callable_fn, _compile_options_fn
     global _sm_arch, _bytecode_version
     if module is not None:
         mod = _import_backend_module(module)
@@ -124,6 +143,11 @@ def set_backend(module: Optional[str] = None, *,
         launch_fn = launch_fn or getattr(mod, "launch", None)
         launch_compiled_fn = launch_compiled_fn or getattr(
             mod, "launch_compiled", None)
+        benchmark_fn = benchmark_fn or getattr(mod, "benchmark", None)
+        benchmark_callable_fn = benchmark_callable_fn or getattr(
+            mod, "benchmark_callable", None)
+        compile_options_fn = compile_options_fn or getattr(
+            mod, "compile_options", None)
         sm_arch = sm_arch or getattr(mod, "sm_arch", None)
         bytecode_version = bytecode_version or getattr(mod, "bytecode_version", None)
 
@@ -132,6 +156,9 @@ def set_backend(module: Optional[str] = None, *,
         _compile_cache_key_fn = compile_cache_key_fn
         _launch_fn = launch_fn
         _launch_compiled_fn = launch_compiled_fn
+        _benchmark_fn = benchmark_fn
+        _benchmark_callable_fn = benchmark_callable_fn
+        _compile_options_fn = compile_options_fn
         _sm_arch = sm_arch
         _bytecode_version = bytecode_version
 
@@ -139,8 +166,9 @@ def set_backend(module: Optional[str] = None, *,
 def clear_backend() -> None:
     """Remove any registered backend hooks and restore the default CUDA path."""
     set_backend(module=None, compile_fn=None, compile_cache_key_fn=None,
-                launch_fn=None, launch_compiled_fn=None, sm_arch=None,
-                bytecode_version=None)
+                launch_fn=None, launch_compiled_fn=None, benchmark_fn=None,
+                benchmark_callable_fn=None, compile_options_fn=None,
+                sm_arch=None, bytecode_version=None)
 
 
 def backend_active() -> bool:
@@ -164,6 +192,20 @@ def get_launch_fn() -> Optional[LaunchFn]:
 
 def get_launch_compiled_fn() -> Optional[LaunchCompiledFn]:
     return _launch_compiled_fn
+
+
+def get_benchmark_fn() -> Optional[BenchmarkFn]:
+    return _benchmark_fn
+
+
+def get_benchmark_callable_fn() -> Optional[BenchmarkCallableFn]:
+    return _benchmark_callable_fn
+
+
+def get_compile_options_fn() -> Optional[CompileOptionsFn]:
+    """Return the active backend compile/launch option scoping callback."""
+
+    return _compile_options_fn
 
 
 def get_sm_arch_override() -> Optional[str]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import gc
 import hashlib
 import importlib
 import importlib.metadata
@@ -11,6 +12,7 @@ import os
 import platform
 import shutil
 import tempfile
+import time
 import threading
 from types import SimpleNamespace
 
@@ -51,6 +53,7 @@ def _current_options() -> dict:
     return getattr(_tls, "options", None) or {}
 
 
+@functools.lru_cache(maxsize=1)
 def _triton_cpu():
     if importlib.util.find_spec("triton") is None:
         raise ImportError(
@@ -262,6 +265,47 @@ def launch(stream, grid, kernel, args):
     return launch_compiled(stream, grid, compiled, args)
 
 
+def benchmark(stream, grid, kernel, args) -> float:
+    if stream not in (None, 0):
+        synchronize = getattr(stream, "synchronize", None)
+        if synchronize is None:
+            raise TypeError("CPU backend stream must be None, zero, or synchronizable")
+        synchronize()
+
+    compiled = compile_for_launch(kernel, args)
+    gc_was_enabled = gc.isenabled()
+    if gc_was_enabled:
+        gc.disable()
+    try:
+        start = time.perf_counter_ns()
+        launch_compiled(stream, grid, compiled, args)
+        elapsed_ns = time.perf_counter_ns() - start
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+    return elapsed_ns / 1_000.0
+
+
+def benchmark_callable(stream, fn, args=()) -> float:
+    if stream not in (None, 0):
+        synchronize = getattr(stream, "synchronize", None)
+        if synchronize is None:
+            raise TypeError("CPU backend stream must be None, zero, or synchronizable")
+        synchronize()
+
+    gc_was_enabled = gc.isenabled()
+    if gc_was_enabled:
+        gc.disable()
+    try:
+        start = time.perf_counter_ns()
+        fn(*args)
+        elapsed_ns = time.perf_counter_ns() - start
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+    return elapsed_ns / 1_000.0
+
+
 def launch_compiled(stream, grid, compiled, args):
     """Launch a previously compiled binary without compilation/cache lookup."""
     signature = compiled.signature
@@ -269,8 +313,7 @@ def launch_compiled(stream, grid, compiled, args):
     symbol = compiled.symbol
     values, triton_signature = _flatten_arguments(signature, args)
     _ir, _target, _backend, CPULauncher, CPUUtils = _triton_cpu()
-    key = (hashlib.sha256(binary).digest(), symbol,
-           tuple(triton_signature.values()))
+    key = (id(binary), symbol, tuple(triton_signature.values()))
     with _cache_lock:
         cached = _launch_cache.get(key)
         if cached is None:
@@ -278,9 +321,9 @@ def launch_compiled(stream, grid, compiled, args):
             launcher = CPULauncher(source, None)
             module, function, *_unused = CPUUtils().load_binary(
                 symbol, binary, 0, 0)
-            cached = module, function, launcher
+            cached = binary, module, function, launcher
             _launch_cache[key] = cached
-    _module, function, launcher = cached
+    _binary, _module, function, launcher = cached
     metadata = SimpleNamespace(
         num_cpu_threads=int(_current_options().get("num_cpu_threads", 0)))
     x, y, z = _triplet(grid)

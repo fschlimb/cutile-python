@@ -15,6 +15,7 @@ from cuda.tile._cext import TileDispatcher, TileContext
 from cuda.tile._cext import launch as _cext_launch
 from cuda.tile._cext import default_tile_context
 from cuda.tile._dispatch_mode import DispatchMode
+from cuda.tile import _backend
 
 if TYPE_CHECKING:
     from cuda.tile.compilation import KernelSignature
@@ -346,7 +347,6 @@ def launch(stream, grid, kernel, kernel_args, /):
     :func:`cuda.tile.set_backend`, execution is delegated to it; otherwise the
     default CUDA driver launch path is used.
     """
-    from cuda.tile import _backend
     launch_fn = _backend.get_launch_fn()
     if launch_fn is not None:
         return launch_fn(stream, grid, kernel, kernel_args)
