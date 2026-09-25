@@ -1,18 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
 import sys
 from types import ModuleType
-
-import numpy as np
-import pytest
+from types import SimpleNamespace
 
 import cuda.tile as ct
 from cuda.tile import _backend
 from cuda.tile._backend import cpu
 from cuda.tile._backend._signature import build_signature
-
+import numpy as np
+import pytest
 
 ConstInt = ct.Constant[int]
 
@@ -43,6 +41,20 @@ def test_signature_flattens_arrays_and_omits_constants():
     assert values[1:3] == [64, 1]
     assert values[4:6] == [64, 1]
     assert values[7:9] == [64, 1]
+
+
+def test_flatten_arguments_reuses_signature_layout():
+    first_arguments = _arguments()
+    second_arguments = _arguments()
+    signature = build_signature(_vector_add, first_arguments)
+    cpu._argument_layout_cache.clear()
+
+    first_values, first_types = cpu._flatten_arguments(signature, first_arguments)
+    second_values, second_types = cpu._flatten_arguments(signature, second_arguments)
+
+    assert first_types is second_types
+    assert first_values[0] == first_arguments[0].ctypes.data
+    assert second_values[0] == second_arguments[0].ctypes.data
 
 
 def test_signature_uses_actual_array_alignment():
@@ -168,7 +180,8 @@ def test_launch_reuses_triton_launcher(monkeypatch):
         lambda: (None, None, None, Launcher, Utils),
     )
     monkeypatch.setattr(
-        ct, "compile_kernel", lambda kernel, signature: (b"object", signature.symbol))
+        ct, "compile_kernel",
+        lambda kernel, signature: (b"object", signature.symbol))
     cpu._launch_cache.clear()
 
     cpu.launch(None, (4,), _vector_add, arguments)

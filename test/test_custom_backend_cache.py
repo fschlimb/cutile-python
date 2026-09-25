@@ -1,15 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 import time
-
-import pytest
+from types import SimpleNamespace
 
 import cuda.tile as ct
 from cuda.tile import _backend
-from cuda.tile.compilation import CallingConvention, KernelSignature
+from cuda.tile._backend._custom import compile_for_launch
+from cuda.tile.compilation import CallingConvention
+from cuda.tile.compilation import KernelSignature
+import pytest
 
 
 @ct.kernel
@@ -70,6 +71,56 @@ def test_memory_cache_compiles_once(monkeypatch, capsys):
     assert first == second
     assert calls == ["tileir", "backend"]
     assert capsys.readouterr().err == ""
+
+
+def test_compile_for_launch_reuses_compiled_descriptor(monkeypatch):
+    calls = []
+
+    def compile_kernel(kernel, signature):
+        calls.append((kernel, signature))
+        return b"binary", signature.symbol
+
+    monkeypatch.setattr(ct, "compile_kernel", compile_kernel)
+    _backend.set_backend(
+        compile_fn=lambda *_args, **_kwargs: b"binary",
+        compile_cache_key_fn=lambda: "test:v1",
+        sm_arch="3000",
+        bytecode_version="13.3",
+    )
+    _kernel._custom_launch_cache = {}
+
+    first = compile_for_launch(_kernel, (1,))
+    second = compile_for_launch(_kernel, (1,))
+
+    assert first is second
+    assert len(calls) == 1
+
+
+def test_compile_for_launch_invalidates_on_compiler_identity_change(monkeypatch):
+    calls = []
+    identity = ["test:v1"]
+
+    def compile_kernel(kernel, signature):
+        calls.append((kernel, signature))
+        return identity[0].encode(), signature.symbol
+
+    monkeypatch.setattr(ct, "compile_kernel", compile_kernel)
+    _backend.set_backend(
+        compile_fn=lambda *_args, **_kwargs: b"binary",
+        compile_cache_key_fn=lambda: identity[0],
+        sm_arch="3000",
+        bytecode_version="13.3",
+    )
+    _kernel._custom_launch_cache = {}
+
+    first = compile_for_launch(_kernel, (1,))
+    identity[0] = "test:v2"
+    second = compile_for_launch(_kernel, (1,))
+
+    assert first is not second
+    assert first.binary == b"test:v1"
+    assert second.binary == b"test:v2"
+    assert len(calls) == 2
 
 
 def test_disk_cache_reuses_backend_binary(monkeypatch, tmp_path, capsys):

@@ -4,17 +4,20 @@
 """Triton-style ``@autotune`` for cuTile kernels and multi-kernel factories."""
 from __future__ import annotations
 
-import inspect
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
+import inspect
 from types import MappingProxyType
 from typing import Any
 
-from cuda.tile import _backend, _execution
+from cuda.tile import _backend
+from cuda.tile import _execution
 from cuda.tile._backend._custom import compile_for_launch
 from cuda.tile._backend._signature import array_metadata
 from cuda.tile.tune._tune import exhaustive_search
+
 
 @dataclass(frozen=True, init=False)
 class Config:
@@ -253,6 +256,9 @@ class AutotunedKernel(_Autotuned):
             raise TypeError(
                 f"autotuned kernel expects {len(self._arg_names)} arguments, "
                 f"got {len(args)}")
+        if len(self._configs) == 1:
+            self._best = 0
+            return 0
         key = _config_key(zip(self._arg_names, args), self._extra_names)
         index = self._cached_index(key)
         if index is None:
@@ -551,4 +557,4 @@ def autotune(*,
     return decorate
 
 
-__all__ = ["Config", "AutotunedKernel", "AutotunedFunction", "autotune"]
+__all__ = ["AutotunedFunction", "AutotunedKernel", "Config", "autotune"]

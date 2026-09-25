@@ -113,7 +113,7 @@ def test_launch_prepared_uses_compiled_kernel(monkeypatch):
 
 def test_autotune_options_scope_tuning_compile_and_launch(monkeypatch):
     events = []
-    _tuned, launched = _fake_runtime(monkeypatch, events)
+    tuned, launched = _fake_runtime(monkeypatch, events)
     options = {"assume_in_bounds": True, "num_cpu_threads": 4}
     autotuned = autotune(
         configs=[Config({"TILE": 4})],
@@ -126,15 +126,15 @@ def test_autotune_options_scope_tuning_compile_and_launch(monkeypatch):
     autotuned.launch_prepared(None)
 
     assert launched == [((1,), (args[0], 1.0, 4))]
+    assert tuned == []
     assert events == [
-        ("enter", options), ("exit", options),
         ("enter", options), ("compile", options), ("exit", options),
         ("enter", options), ("launch", options), ("exit", options),
     ]
 
 
 def test_autotune_options_callable_receives_configured_meta(monkeypatch):
-    _tuned, _launched = _fake_runtime(monkeypatch)
+    tuned, _launched = _fake_runtime(monkeypatch)
     received = []
 
     def options(meta):
@@ -149,7 +149,8 @@ def test_autotune_options_callable_receives_configured_meta(monkeypatch):
     x = torch.empty(16)
     autotuned(None, (x, 16, True))
 
-    assert len(received) == 2
+    assert tuned == []
+    assert len(received) == 1
     assert all(meta["x"] is x and meta["N"] == 16
                and meta["TILE"] == 4 and meta["FLAG"] is True
                for meta in received)
@@ -167,7 +168,7 @@ def test_autotune_rejects_invalid_options_callable_result(monkeypatch):
         autotuned(None, (torch.empty(16), 1.0))
 
 
-def test_autotune_retunes_for_shape_and_unconfigured_constant_changes(monkeypatch):
+def test_single_config_skips_tuning_for_different_keys(monkeypatch):
     tuned, launched = _fake_runtime(monkeypatch)
     autotuned = autotune(
         configs=[Config({"TILE": 4})],
@@ -177,8 +178,8 @@ def test_autotune_retunes_for_shape_and_unconfigured_constant_changes(monkeypatc
     autotuned(None, (torch.empty(16), 16, True))
     autotuned(None, (torch.empty(16), 32, True))
 
-    assert len(tuned) == 2
-    assert [entry[2] for entry in tuned] == [(4,), (4,)]
+    assert tuned == []
+    assert [entry[1][1] for entry in launched] == [16, 32]
 
 
 def test_unkeyed_runtime_scalar_cannot_reuse_stale_grid(monkeypatch):
@@ -192,7 +193,7 @@ def test_unkeyed_runtime_scalar_cannot_reuse_stale_grid(monkeypatch):
     autotuned(None, (x, 1.0))
     autotuned(None, (x, 2.0))
 
-    assert len(tuned) == 1
+    assert tuned == []
     assert [entry[0] for entry in launched] == [(1,), (2,)]
 
 

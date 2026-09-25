@@ -12,17 +12,21 @@ import os
 import platform
 import shutil
 import tempfile
-import time
 import threading
+import time
 from types import SimpleNamespace
 
 import cuda.tile as ct
-from cuda.tile.compilation import ArrayConstraint, ConstantConstraint, ScalarConstraint
+from cuda.tile.compilation import ArrayConstraint
+from cuda.tile.compilation import ConstantConstraint
+from cuda.tile.compilation import ScalarConstraint
 
-from ._custom import compile_for_launch, normalize_dims
+from ._custom import compile_for_launch
+from ._custom import normalize_dims
 from ._signature import array_metadata
-from ._toolchain import file_fingerprint, resolve_tool, run_tool
-
+from ._toolchain import file_fingerprint
+from ._toolchain import resolve_tool
+from ._toolchain import run_tool
 
 sm_arch = "3000"
 bytecode_version = "13.3"
@@ -30,6 +34,11 @@ bytecode_version = "13.3"
 _tls = threading.local()
 _cache_lock = threading.Lock()
 _launch_cache = {}
+_argument_layout_cache = {}
+_compile_cache_key_state = None
+_compile_cache_key_value = None
+
+_ARGUMENT_LAYOUT_CACHE_LIMIT = 128
 
 
 def _assume_in_bounds():
@@ -153,6 +162,7 @@ def _compile_cache_key_cached(environment, assume_in_bounds):
 def compile_cache_key():
     """Identify all CPU toolchain and option inputs affecting compilation."""
 
+    global _compile_cache_key_state, _compile_cache_key_value
     assume_in_bounds = _assume_in_bounds()
     try:
         *_modules, triton_knobs = _cpu_identity_modules()
@@ -169,7 +179,18 @@ def compile_cache_key():
         "LLVM_PASS_PLUGIN_PATH",
         "TRITON_ENABLE_ASAN",
     ))
-    return _compile_cache_key_cached(environment, assume_in_bounds)
+    state = (
+        id(_cpu_compiler),
+        id(_cpu_identity_modules),
+        id(_compile_cache_key_cached),
+        environment,
+        assume_in_bounds,
+    )
+    if state != _compile_cache_key_state:
+        _compile_cache_key_state = state
+        _compile_cache_key_value = _compile_cache_key_cached(
+            environment, assume_in_bounds)
+    return _compile_cache_key_value
 
 
 def _lower_tileir(bytecode: bytes) -> bytes:
@@ -177,15 +198,14 @@ def _lower_tileir(bytecode: bytes) -> bytes:
     assume_in_bounds = str(_assume_in_bounds()).lower()
     argv = [
         tool,
-        "--tileir-to-mlir-pipeline="
-        f"target=cpu append-grid-args=true drop-rounding-modes=true "
-        f"assume-in-bounds={assume_in_bounds}",
+        "--tileir-to-mlir-pipeline=target=cpu append-grid-args=true drop-rounding-modes=true "
+            f"assume-in-bounds={assume_in_bounds}",
         "--loop-invariant-code-motion",
         "--convert-memref-args-to-ptr-args",
         "--cse",
         "--canonicalize",
+        "--mlir-print-ir-before-all"
     ]
-    print(argv)
     output = run_tool("CPU", argv, bytecode)
     dump = os.environ.get("CUTILE_CPU_DUMP_MLIR")
     if dump:
@@ -214,7 +234,7 @@ def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
         "cluster_dims": (1, 1, 1),
     }
     module = backend.make_tttcir(module, metadata, options, from_tileir=True)
-    llvm_ir = backend.make_llir(module, metadata, options, from_tileir=True)
+    llvm_ir = backend.make_llir(module, metadata, options)
     assembly = backend.make_asm(llvm_ir, metadata, options)
     return backend.make_so(assembly, metadata, options)
 
@@ -226,11 +246,17 @@ _SCALAR_TYPES = {
 }
 
 
-def _flatten_arguments(signature, arguments):
-    values = []
+def _argument_layout(signature):
+    key = id(signature)
+    cached = _argument_layout_cache.get(key)
+    if cached is not None and cached[0] is signature:
+        return cached[1]
+
+    kinds = []
     types = []
-    for parameter, argument in zip(signature.parameters, arguments):
+    for parameter in signature.parameters:
         if isinstance(parameter, ConstantConstraint):
+            kinds.append(None)
             continue
         if isinstance(parameter, ScalarConstraint):
             try:
@@ -238,17 +264,35 @@ def _flatten_arguments(signature, arguments):
             except KeyError:
                 raise TypeError(
                     f"CPU backend: unsupported scalar dtype {parameter.dtype}") from None
-            values.append(argument)
+            kinds.append("scalar")
             continue
         if not isinstance(parameter, ArrayConstraint):
             raise TypeError(
                 f"CPU backend: unsupported parameter constraint "
                 f"{type(parameter).__name__}")
-        pointer, shape, strides, _dtype = array_metadata(argument)
         index_type = "i64" if parameter.index_dtype is ct.int64 else "i32"
         types.extend(["*i8", *([index_type] * parameter.ndim * 2)])
+        kinds.append("array")
+
+    layout = tuple(kinds), {index: value for index, value in enumerate(types)}
+    if len(_argument_layout_cache) >= _ARGUMENT_LAYOUT_CACHE_LIMIT:
+        _argument_layout_cache.clear()
+    _argument_layout_cache[key] = signature, layout
+    return layout
+
+
+def _flatten_arguments(signature, arguments):
+    values = []
+    kinds, types = _argument_layout(signature)
+    for kind, argument in zip(kinds, arguments):
+        if kind is None:
+            continue
+        if kind == "scalar":
+            values.append(argument)
+            continue
+        pointer, shape, strides, _dtype = array_metadata(argument)
         values.extend([pointer, *shape, *strides])
-    return values, {index: value for index, value in enumerate(types)}
+    return values, types
 
 
 _triplet = normalize_dims

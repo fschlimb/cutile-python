@@ -3,13 +3,16 @@
 """Shared launch preparation for non-CUDA backends."""
 
 from dataclasses import dataclass
+import threading
 
 import cuda.tile as ct
 from cuda.tile.compilation import KernelSignature
 
-from ._signature import array_metadata, build_signature
+from ._signature import array_metadata
+from ._signature import build_signature
 
 _SIGNATURE_CACHE_LIMIT = 128
+_COMPILED_LAUNCH_CACHE_LIMIT = 128
 
 # Base address assumptions beyond this many bytes are not distinguished by the cache key.
 _MAX_TRACKED_ALIGNMENT_LOG2 = 12
@@ -22,6 +25,24 @@ class CompiledKernel:
     binary: bytes
     symbol: str
     signature: KernelSignature
+
+
+def _compiler_cache_key():
+    from cuda.tile import _backend
+
+    compile_fn = _backend.get_compile_fn()
+    cache_key_fn = _backend.get_compile_cache_key_fn()
+    if compile_fn is None or cache_key_fn is None:
+        return None
+    compiler_identity = cache_key_fn()
+    if not isinstance(compiler_identity, str | bytes):
+        return None
+    return (
+        id(compile_fn),
+        compiler_identity,
+        _backend.get_sm_arch_override(),
+        _backend.get_bytecode_version_override(),
+    )
 
 
 def launch_compiled(stream, grid, compiled: CompiledKernel, args):
@@ -66,8 +87,33 @@ def compile_for_launch(kernel, args, *, signature_builder=build_signature):
     """Build a runtime signature and compile or retrieve its backend binary."""
 
     signature = _build_signature_cached(kernel, args, signature_builder)
-    binary, symbol = ct.compile_kernel(kernel, signature)
-    return CompiledKernel(binary, symbol, signature)
+    compiler_key = _compiler_cache_key()
+    if compiler_key is None:
+        binary, symbol = ct.compile_kernel(kernel, signature)
+        return CompiledKernel(binary, symbol, signature)
+
+    cache = getattr(kernel, "_custom_launch_cache", None)
+    if cache is None:
+        cache = {}
+        kernel._custom_launch_cache = cache
+    key = (id(signature_builder), id(signature), compiler_key)
+    compiled = cache.get(key)
+    if compiled is not None:
+        return compiled
+
+    lock = getattr(kernel, "_custom_compile_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        kernel._custom_compile_lock = lock
+    with lock:
+        compiled = cache.get(key)
+        if compiled is None:
+            binary, symbol = ct.compile_kernel(kernel, signature)
+            compiled = CompiledKernel(binary, symbol, signature)
+            if len(cache) >= _COMPILED_LAUNCH_CACHE_LIMIT:
+                cache.clear()
+            cache[key] = compiled
+    return compiled
 
 
 def normalize_dims(value) -> tuple[int, int, int]:
