@@ -26,21 +26,23 @@ _MAX_SPECIALIZED_NDIM = 5
 
 def array_metadata(value: Any) -> tuple[int, tuple[int, ...], tuple[int, ...], Any]:
     """Return ``(pointer, shape, strides, dtype)`` with strides in elements."""
-    if hasattr(value, "data_ptr") and callable(value.data_ptr):
-        pointer = int(value.data_ptr())
-        shape = tuple(map(int, value.shape))
-        strides = tuple(map(int, value.stride()))
-        return pointer, shape, strides, value.dtype
-    if hasattr(value, "__array_interface__"):
-        array = np.asarray(value)
-        itemsize = array.dtype.itemsize
-        if any(stride % itemsize for stride in array.strides):
-            raise ValueError("array strides must be multiples of the element size")
-        strides = tuple(stride // itemsize for stride in array.strides)
-        return array.__array_interface__["data"][0], array.shape, strides, array.dtype
-    raise TypeError(
-        f"expected an array with data_ptr() or __array_interface__, got "
-        f"{type(value).__name__}")
+    if not isinstance(value, np.ndarray):
+        data_ptr = getattr(value, "data_ptr", None)
+        if callable(data_ptr):
+            pointer = int(data_ptr())
+            shape = tuple(map(int, value.shape))
+            strides = tuple(map(int, value.stride()))
+            return pointer, shape, strides, value.dtype
+        if not hasattr(value, "__array_interface__"):
+            raise TypeError(
+                f"expected an array with data_ptr() or __array_interface__, got "
+                f"{type(value).__name__}")
+        value = np.asarray(value)
+    itemsize = value.dtype.itemsize
+    if any(stride % itemsize for stride in value.strides):
+        raise ValueError("array strides must be multiples of the element size")
+    strides = tuple(stride // itemsize for stride in value.strides)
+    return value.ctypes.data, value.shape, strides, value.dtype
 
 
 def array_device_type(value: Any) -> str:
