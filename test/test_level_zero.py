@@ -28,11 +28,9 @@ def test_kernel_argument_validation(arguments, match):
 
 def test_launch_validation_does_not_initialize_runtime():
     with pytest.raises(ValueError, match="must not be empty"):
-        _level_zero.launch_level_zero_module_kernel(
-            b"", "kernel", [], (1, 1, 1), (1, 1, 1)
-        )
+        _level_zero.Kernel(b"", "kernel")
+    with pytest.raises(ValueError, match="must not be empty"):
+        _level_zero.Kernel(b"module", "")
 
     with pytest.raises(TypeError):
-        _level_zero.launch_level_zero_module_kernel(
-            b"", "kernel", [], (1, 1), (1, 1, 1)
-        )
+        _level_zero.Kernel(b"module", "kernel").launch([], (1, 1), (1, 1, 1))

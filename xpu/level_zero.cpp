@@ -5,10 +5,10 @@
 /**
  * Nanobind bridge from the Python XPU backend to MLIR's Level Zero runtime.
  *
- * The binding accepts a compiled device module plus scalar bytes and memref
- * metadata prepared by xpu.py, flattens them into MLIR's kernel ABI, and runs
- * the kernel synchronously. Runtime streams and modules are owned entirely by
- * this call and are released before control returns to Python.
+ * A Kernel wraps a compiled device module. Its launch() accepts scalar bytes
+ * and memref metadata prepared by xpu.py, flattens them into MLIR's kernel
+ * ABI, and runs the kernel synchronously. The module is loaded on first use
+ * and then reused for the lifetime of the process.
  */
 
 #include <nanobind/nanobind.h>
@@ -17,11 +17,13 @@
 #include <nanobind/stl/vector.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace nb = nanobind;
@@ -106,6 +108,11 @@ public:
       destroy(value);
   }
   T get() const { return value; }
+  T release() {
+    T released = value;
+    value = nullptr;
+    return released;
+  }
 
 private:
   T value;
@@ -173,52 +180,81 @@ void marshalArguments(nb::iterable arguments, KernelParams &params) {
   params.finish();
 }
 
-void launchLevelZeroModuleKernel(nb::bytes moduleBlob,
-                                 const std::string &kernelName,
-                                 nb::iterable arguments,
-                                 const std::array<size_t, 3> &grid,
-                                 const std::array<size_t, 3> &block) {
-  if (moduleBlob.size() == 0)
-    throw nb::value_error("module_blob must not be empty");
-  if (kernelName.empty())
-    throw nb::value_error("kernel_name must not be empty");
-  KernelParams params;
-  marshalArguments(arguments, params);
-  RuntimeApi &api = runtimeApi();
-
-  // Python objects are no longer accessed below. Release the GIL so other
-  // Python threads keep running during the blocking device calls, and
-  // serialize access to the runtime's global Level Zero context, whose
-  // thread-safety under concurrent use is undocumented.
-  nb::gil_scoped_release release;
-  std::lock_guard<std::mutex> lock(runtimeMutex);
-
-  Handle<void *> module(api.moduleLoad(moduleBlob.data(), moduleBlob.size()),
-                        api.moduleUnload);
-  if (!module.get())
-    throw std::runtime_error("mgpuModuleLoad returned a null handle");
-
-  void *kernel = api.moduleGetFunction(module.get(), kernelName.c_str());
-  if (!kernel)
-    throw std::runtime_error("mgpuModuleGetFunction returned a null handle");
-
-  Handle<StreamWrapper *> stream(api.streamCreate(), api.streamDestroy);
-  if (!stream.get())
-    throw std::runtime_error("mgpuStreamCreate returned a null handle");
-
-  api.launchKernel(kernel, grid[0], grid[1], grid[2], block[0], block[1],
-                   block[2], 0, stream.get(), params.pointers.data(), nullptr,
-                   params.pointers.size());
-  // Arguments, stream, and module must remain alive until execution completes.
-  api.streamSynchronize(stream.get());
+// The runtime keeps its Level Zero context per thread, so a module can only be
+// launched from the thread that loaded it. Kernel ids are never reused, so a
+// stale entry cannot alias a newer Kernel.
+std::unordered_map<uint64_t, void *> &threadKernels() {
+  thread_local std::unordered_map<uint64_t, void *> kernels;
+  return kernels;
 }
+
+std::atomic<uint64_t> nextKernelId{1};
+
+// A device module and one of its kernels. Each launching thread loads the
+// module once; modules stay loaded for the lifetime of the process because the
+// runtime cannot destroy kernel handles, which must not outlive their module.
+class Kernel {
+public:
+  Kernel(nb::bytes moduleBlob, std::string kernelName)
+      : id(nextKernelId++), blob(std::move(moduleBlob)),
+        name(std::move(kernelName)) {
+    if (blob.size() == 0)
+      throw nb::value_error("module_blob must not be empty");
+    if (name.empty())
+      throw nb::value_error("kernel_name must not be empty");
+  }
+
+  void launch(nb::iterable arguments, const std::array<size_t, 3> &grid,
+              const std::array<size_t, 3> &block) {
+    KernelParams params;
+    marshalArguments(arguments, params);
+    RuntimeApi &api = runtimeApi();
+    const char *data = blob.c_str();
+    const size_t size = blob.size();
+
+    // Python objects are no longer accessed below. Release the GIL so other
+    // Python threads keep running during the blocking device calls, and
+    // serialize access to the runtime, whose thread-safety under concurrent
+    // use is undocumented.
+    nb::gil_scoped_release release;
+    std::lock_guard<std::mutex> lock(runtimeMutex);
+
+    void *&kernel = threadKernels()[id];
+    if (!kernel) {
+      Handle<void *> module(api.moduleLoad(data, size), api.moduleUnload);
+      if (!module.get())
+        throw std::runtime_error("mgpuModuleLoad returned a null handle");
+      void *function = api.moduleGetFunction(module.get(), name.c_str());
+      if (!function)
+        throw std::runtime_error("mgpuModuleGetFunction returned a null handle");
+      module.release();
+      kernel = function;
+    }
+
+    Handle<StreamWrapper *> stream(api.streamCreate(), api.streamDestroy);
+    if (!stream.get())
+      throw std::runtime_error("mgpuStreamCreate returned a null handle");
+
+    api.launchKernel(kernel, grid[0], grid[1], grid[2], block[0], block[1],
+                     block[2], 0, stream.get(), params.pointers.data(), nullptr,
+                     params.pointers.size());
+    // Arguments and stream must remain alive until execution completes.
+    api.streamSynchronize(stream.get());
+  }
+
+private:
+  uint64_t id;
+  nb::bytes blob;
+  std::string name;
+};
 
 } // namespace
 
 NB_MODULE(_level_zero, module) {
-  module.def("launch_level_zero_module_kernel", &launchLevelZeroModuleKernel,
-             "module_blob"_a, "kernel_name"_a, "arguments"_a,
-             "grid_size"_a, "block_size"_a);
+  nb::class_<Kernel>(module, "Kernel")
+      .def(nb::init<nb::bytes, std::string>(), "module_blob"_a, "kernel_name"_a)
+      .def("launch", &Kernel::launch, "arguments"_a, "grid_size"_a,
+           "block_size"_a);
   module.def("_kernel_parameter_count", [](nb::iterable arguments) {
     KernelParams params;
     marshalArguments(arguments, params);

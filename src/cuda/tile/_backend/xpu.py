@@ -35,7 +35,7 @@ from ._toolchain import file_fingerprint, resolve_tool, run_tool
 
 
 from mlir import ir  # noqa: E402
-from cuda.tile._level_zero import launch_level_zero_module_kernel  # noqa: E402
+from cuda.tile._level_zero import Kernel as _LevelZeroKernel  # noqa: E402
 
 from .xeas import xeas
 
@@ -293,14 +293,15 @@ def _runtime_kernel_args(signature: KernelSignature, args: tuple) -> list:
 
 
 class _Loaded(NamedTuple):
-    binary: bytes
+    kernel: _LevelZeroKernel
     signature: KernelSignature
     block: tuple[int, int, int]
 
 
 def load(binary: bytes, signature: KernelSignature, options: Options) -> _Loaded:
-    """Bind a binary to the launch block it was compiled for."""
-    return _Loaded(binary, signature, options.block)
+    """Wrap a binary for Level Zero, bound to the block it was compiled for."""
+    return _Loaded(_LevelZeroKernel(binary, signature.symbol), signature,
+                   options.block)
 
 
 def synchronize(stream):
@@ -320,6 +321,4 @@ def launch(loaded: _Loaded, stream, grid, args):
     # completed, so ordering is restored on the way out.
     synchronize(stream)
 
-    launch_level_zero_module_kernel(
-        loaded.binary, loaded.signature.symbol, runtime_args,
-        normalize_dims(grid), loaded.block)
+    loaded.kernel.launch(runtime_args, normalize_dims(grid), loaded.block)

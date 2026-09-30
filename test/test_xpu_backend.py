@@ -107,10 +107,17 @@ def test_compile_passes_options_to_the_toolchain_in_an_mlir_context(monkeypatch)
 
 
 def test_launch_uses_the_compiled_block_and_symbol(monkeypatch):
-    launches = []
-    monkeypatch.setattr(
-        xpu, "launch_level_zero_module_kernel",
-        lambda *args: launches.append(args))
+    kernels = []
+
+    class Kernel:
+        def __init__(self, binary, symbol):
+            self.binary, self.symbol, self.launches = binary, symbol, []
+            kernels.append(self)
+
+        def launch(self, *args):
+            self.launches.append(args)
+
+    monkeypatch.setattr(xpu, "_LevelZeroKernel", Kernel)
     signature = build_signature(_counter, (7, 4))
     options = xpu.normalize_options(
         {"wg_m": 64, "wg_n": 32, "sg_m": 32, "sg_n": 16})
@@ -118,13 +125,14 @@ def test_launch_uses_the_compiled_block_and_symbol(monkeypatch):
     loaded = xpu.load(b"binary", signature, options)
     with _backend.compile_options(_OPTIONS):
         xpu.launch(loaded, None, (2,), (7, 4))
+        xpu.launch(loaded, None, (3,), (8, 4))
 
-    [(binary, symbol, arguments, grid, block)] = launches
-    assert binary == b"binary"
-    assert symbol == signature.symbol
-    assert arguments == [np.int32(7).tobytes()]
-    assert grid == (2, 1, 1)
-    assert block == (64, 1, 1)
+    [kernel] = kernels
+    assert (kernel.binary, kernel.symbol) == (b"binary", signature.symbol)
+    assert kernel.launches == [
+        ([np.int32(7).tobytes()], (2, 1, 1), (64, 1, 1)),
+        ([np.int32(8).tobytes()], (3, 1, 1), (64, 1, 1)),
+    ]
 
 
 def test_runtime_arguments_reject_host_tensors():

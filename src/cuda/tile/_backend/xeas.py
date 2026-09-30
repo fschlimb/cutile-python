@@ -16,8 +16,7 @@ the XeGPU pipeline's ``outlined`` stage.
 xeas runs the upstream ``gpu-lower-to-xevm-pipeline`` on that IR to produce a
 ``gpu.binary`` op, then returns the embedded device object -- the exact byte
 string the Level Zero runtime loads at run time (``mgpuModuleLoad``). The blob
-can be launched with
-:func:`cuda.tile._level_zero.launch_level_zero_module_kernel`
+can be launched with :class:`cuda.tile._level_zero.Kernel`
 without producing a host-side launcher or shared library.
 
 The high-level entry point is :func:`xeas`:
@@ -135,8 +134,7 @@ def xeas(
     device kernel with :func:`extract_gpu_binary`, returning the blob bytes --
     the exact byte string the Level Zero runtime loads at run time
     (``mgpuModuleLoad``).
-    :func:`cuda.tile._level_zero.launch_level_zero_module_kernel`
-    launches the kernel directly from it.
+    :class:`cuda.tile._level_zero.Kernel` launches the kernel directly from it.
 
     Args:
         source: MLIR text at the ``outlined`` stage.
