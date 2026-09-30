@@ -126,7 +126,7 @@ if __name__ == "__main__":
     M_DIM = 512
     K_DIM = 256
     N_DIM = 1024
-    
+
     options = {
         "wg_m": 128, "wg_n": 256,
         "sg_m": 64, "sg_n": 32,

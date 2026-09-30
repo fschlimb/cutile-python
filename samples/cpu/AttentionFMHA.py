@@ -10,7 +10,6 @@ from torch.nn.functional import scaled_dot_product_attention
 import numpy as np
 from cuda.tile import RoundingMode as RMd
 from cuda.tile._backend import cpu
-from utils.benchmark import report_benchmark
 
 
 ct.set_backend("cpu")

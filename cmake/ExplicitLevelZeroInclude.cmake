@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES
      "${CUTILE_LEVEL_ZERO_INCLUDE_DIR}")
 list(REMOVE_ITEM CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES

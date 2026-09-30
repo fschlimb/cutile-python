@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
 """Pluggable backend hooks for retargeting cuTile to a non-CUDA backend.

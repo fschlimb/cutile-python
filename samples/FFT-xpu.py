@@ -13,7 +13,7 @@ ct.set_backend("xpu")
 
 # The tile program and factor generation are backend-independent. Keep them shared
 # with the CUDA sample so the numerical algorithm cannot diverge between backends.
-from FFT import fft_kernel, make_twiddles
+from FFT import fft_kernel, make_twiddles  # noqa: E402
 
 
 def cutile_fft(

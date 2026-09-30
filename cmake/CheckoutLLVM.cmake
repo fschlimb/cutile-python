@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 foreach(_required GIT_EXECUTABLE SOURCE_DIR
     TILEIR_REQUIRED_LLVM_REVISION TRITON_REQUIRED_LLVM_REVISION)
     if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")

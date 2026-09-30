@@ -207,9 +207,9 @@ def block_scaled_matmul_kernel(
 
         # Expand one scale factor per K block and apply it before ordinary MMA.
         a_scale = ct.broadcast_to(a_scale.reshape((tm, tks, 1)),
-                      (tm, tks, scaling_block_size)).reshape((tm, tk))
+                                  (tm, tks, scaling_block_size)).reshape((tm, tk))
         b_scale = ct.broadcast_to(b_scale.reshape((tks, 1, tn)),
-                      (tks, scaling_block_size, tn)).reshape((tk, tn))
+                                  (tks, scaling_block_size, tn)).reshape((tk, tn))
         accumulator = ct.mma(a * a_scale, b * b_scale, accumulator)
 
     # Store the computed tile to the global memory of the output matrix C.

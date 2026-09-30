@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 if(CUTILE_BUILD_VARIANT MATCHES "^(xpu|cpu)$")
     set(_cutile_build_tileir_default ON)
 else()
@@ -47,7 +51,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 file(STRINGS "${_tileir_required_llvm_revision_file}"
      _tileir_required_llvm_revision LIMIT_COUNT 1)
 file(STRINGS "${_triton_required_llvm_revision_file}"
-     _triton_required_llvm_revision LIMIT_COUNT 1)
+     _triton_required_llvm_revision REGEX "^[0-9a-f]+$" LIMIT_COUNT 1)
 set(_cutile_llvm_override "")
 if(DEFINED ENV{USE_LLVM_REVISION} AND NOT "$ENV{USE_LLVM_REVISION}" STREQUAL "")
     set(_cutile_llvm_override "$ENV{USE_LLVM_REVISION}")

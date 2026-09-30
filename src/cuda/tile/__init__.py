@@ -167,7 +167,7 @@ from cuda.tile._stub import (
 from cuda.tile._context import compiler_timeout
 
 from cuda.tile import tune
-autotune = tune.autotune
+from cuda.tile.tune import autotune
 
 from cuda.tile._execution import (
     function,

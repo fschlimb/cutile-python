@@ -55,7 +55,7 @@ def batch_matmul_kernel(A, B, C, tm: ConstInt, tn: ConstInt, tk: ConstInt):
 
 
 def bmm(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
-    num_cpu_threads: int = 0) -> torch.Tensor:
+        num_cpu_threads: int = 0) -> torch.Tensor:
     """
     Batch Matrix Multiplication using cuTile's standard tiled kernel.
 

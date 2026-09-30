@@ -58,7 +58,7 @@ class BuildExtWithCmake(build_ext):
 
     def run(self):
         if (os.getenv("CUDA_TILE_SKIP_CMAKE_BUILD") == "1"
-            and os.getenv("CUTILE_BUILD_VARIANT") == "cpu"):
+                and os.getenv("CUTILE_BUILD_VARIANT") == "cpu"):
             return
 
         build_dir = os.getenv("CUDA_TILE_CEXT_BUILD_DIR")

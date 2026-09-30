@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
 [submodule "tileir-to-mlir"]
 	path = tileir-to-mlir
 	url = https://github.com/libxsmm/tileir-to-mlir.git

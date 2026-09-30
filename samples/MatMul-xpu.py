@@ -36,7 +36,7 @@ def swizzle_2d(M, N, tm, tn, GROUP_SIZE_M):
     return swizzle_2d_from_bid(M, N, tm, tn, GROUP_SIZE_M, bid)
 
 
-@ct.kernel  #(num_ctas=ct.ByTarget(sm_100=2))
+@ct.kernel  # (num_ctas=ct.ByTarget(sm_100=2))
 def matmul_kernel(A, B, C,
                   tm: ConstInt,         # Tile size along M dimension (rows of C)
                   tn: ConstInt,         # Tile size along N dimension (columns of C)
@@ -182,7 +182,8 @@ def persistent_matmul_kernel(A, B, C,
         ct.store(C, index=(bidx, bidy), tile=accumulator)
 
 
-def cutile_matmul(A: torch.Tensor, B: torch.Tensor, options: dict, persistent: bool = False) -> torch.Tensor:
+def cutile_matmul(A: torch.Tensor, B: torch.Tensor, options: dict,
+                  persistent: bool = False) -> torch.Tensor:
     """
     Performs matrix multiplication C = A @ B using a cuTile kernel with a 2D grid.
 
@@ -299,7 +300,9 @@ if __name__ == "__main__":
         C_fp32_cutile = cutile_matmul(A_fp16, B_fp16, options)
     print(f"cuTile Output C shape: {C_fp32_cutile.shape}, dtype: {C_fp32_cutile.dtype}")
     if args.correctness_check:
-        torch.testing.assert_close(C_fp32_cutile, A_fp16.to(torch.float32) @ B_fp16.to(torch.float32), atol=atol, rtol=rtol)
+        torch.testing.assert_close(
+            C_fp32_cutile, A_fp16.to(torch.float32) @ B_fp16.to(torch.float32),
+            atol=atol, rtol=rtol)
         print("Correctness check passed")
     else:
         print("Correctness check disabled")
@@ -344,7 +347,10 @@ if __name__ == "__main__":
     C_non_mult_cutile = cutile_matmul(A_non_mult, B_non_mult, options)
     print(f"cuTile Output C shape: {C_non_mult_cutile.shape}, dtype: {C_non_mult_cutile.dtype}")
     if args.correctness_check:
-        torch.testing.assert_close(C_fp32_cutile, A_fp16.to(torch.float32) @ B_fp16.to(torch.float32), atol=atol, rtol=rtol)
+        torch.testing.assert_close(
+            C_non_mult_cutile,
+            A_non_mult.to(torch.float32) @ B_non_mult.to(torch.float32),
+            atol=atol, rtol=rtol)
         print("Correctness check passed")
     else:
         print("Correctness check disabled")

@@ -260,7 +260,10 @@ def test_module_compiler_override_does_not_inherit_cache_key(monkeypatch):
         compile_tileir=lambda *_args, **_kwargs: b"module",
         compile_cache_key=lambda: "module:v1",
     )
-    override = lambda *_args, **_kwargs: b"override"
+
+    def override(*_args, **_kwargs):
+        return b"override"
+
     monkeypatch.setattr(
         _backend, "_import_backend_module", lambda name: module)
 

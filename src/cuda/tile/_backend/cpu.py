@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import contextlib
@@ -199,8 +203,8 @@ def _lower_tileir(bytecode: bytes) -> bytes:
     assume_in_bounds = str(_assume_in_bounds()).lower()
     argv = [
         tool,
-        "--tileir-to-mlir-pipeline=target=cpu append-grid-args=true drop-rounding-modes=true "
-            f"assume-in-bounds={assume_in_bounds}",
+        "--tileir-to-mlir-pipeline=target=cpu append-grid-args=true "
+        f"drop-rounding-modes=true assume-in-bounds={assume_in_bounds}",
         "--loop-invariant-code-motion",
         "--convert-memref-args-to-ptr-args",
         "--cse",

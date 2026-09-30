@@ -253,8 +253,10 @@ class CuTileLayerNorm(torch.autograd.Function):
         final_db = torch.empty((TILE_M, N), dtype=bias.dtype, device=bias.device)
 
         # Launch the second backward kernel to reduce partial dW/dB
-        with xpu.compile_options({"wg_m": TILE_M, "wg_n": TILE_N, "block_threads": (1, 32, 16)}):
-            ct.launch(torch.xpu.current_stream(), (math.ceil(N / TILE_N), 1, 1), layer_norm_bwd_dwdb,
+        with xpu.compile_options({"wg_m": TILE_M, "wg_n": TILE_N,
+                                  "block_threads": (1, 32, 16)}):
+            ct.launch(torch.xpu.current_stream(), (math.ceil(N / TILE_N), 1, 1),
+                      layer_norm_bwd_dwdb,
                       (dw, db, final_dw, final_db, TILE_M, TILE_N))
 
         return (dx.reshape(*grad_output.shape), final_dw[0], final_db[0], None)

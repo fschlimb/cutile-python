@@ -180,7 +180,8 @@ def _build_options(base: dict, *, wg_m: int, wg_n: int) -> dict:
     return opts
 
 
-def vec_add(a: torch.Tensor, b: torch.Tensor, options: dict | None = None, use_gather: bool = False) -> torch.Tensor:
+def vec_add(a: torch.Tensor, b: torch.Tensor, options: dict | None = None,
+            use_gather: bool = False) -> torch.Tensor:
     """
     Performs element-wise addition of two tensors (vector or matrix) using
     different cuTile kernels based on dimensionality and gather/scatter preference.

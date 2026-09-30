@@ -29,7 +29,6 @@ import cuda.tile as ct
 from cuda.tile.compilation import KernelSignature, ScalarConstraint, ConstantConstraint
 
 from ._custom import compile_for_launch, normalize_dims
-from ._signature import build_signature
 from ._toolchain import file_fingerprint, resolve_tool, run_tool
 
 
@@ -229,12 +228,12 @@ def _run_tileir_to_mlir(tool: str, bytecode: bytes, options: dict) -> str:
     """
     block = _launch_block(options)
     assume_in_bounds = str(options.get("assume_in_bounds", False)).lower()
-    argv = [tool,
-            f"--tileir-to-mlir-pipeline=drop-rounding-modes=true known-block-size={','.join(map(str, block))} assume-in-bounds={assume_in_bounds}",
-            "--convert-memref-args-to-ranked-memref=remove-unused=assumed-memref-dependent",
-            # "--loop-invariant-code-motion", "-canonicalize", "-cse",
-            # "--mlir-print-ir-before-all",
-            # "--mlir-print-ir-after-all",
+    argv = [
+        tool,
+        "--tileir-to-mlir-pipeline=drop-rounding-modes=true "
+        f"known-block-size={','.join(map(str, block))} "
+        f"assume-in-bounds={assume_in_bounds}",
+        "--convert-memref-args-to-ranked-memref=remove-unused=assumed-memref-dependent",
     ]
     mlir = run_tool("XPU", argv, bytecode).decode(errors="replace")
     if os.environ.get("CUTILE_XPU_DUMP_MLIR"):
