@@ -79,12 +79,14 @@ def extract_gpu_binary(module: ir.Module, *, large_register_file: bool = True) -
 def _xevm_pipeline(
     xegpu_op_level: str,
     large_register_file: bool,
+    chip: str,
     enable_vector_to_xegpu: bool = True,
 ) -> str:
     """Build the textual pass pipeline lowering XeGPU IR to a device binary."""
     options = [
         f"xegpu-op-level={xegpu_op_level}",
         f"enable-vector-to-xegpu={'true' if enable_vector_to_xegpu else 'false'}",
+        f"zebin-chip={chip}",
     ]
     if large_register_file:
         options.append("igc-cmd-options=-ze-opt-large-register-file")
@@ -96,6 +98,7 @@ def lower_payload(
     *,
     xegpu_op_level: str = "workgroup",
     large_register_file: bool = True,
+    chip: str = "bmg",
 ) -> ir.Module:
     """Lower an outlined MLIR kernel to a module containing its ``gpu.binary``.
 
@@ -107,13 +110,14 @@ def lower_payload(
         source: MLIR text at the ``outlined`` stage.
         xegpu_op_level: Initial XeGPU operation level for the lowering pipeline.
         large_register_file: Enable the large register file IGC option.
+        chip: Target device for the native binary (e.g. ``bmg``, ``pvc``).
 
     Returns:
         The lowered module containing the embedded ``gpu.binary`` kernel.
     """
     with ir.Location.unknown():
         module = ir.Module.parse(source)
-        pipeline = _xevm_pipeline(xegpu_op_level, large_register_file)
+        pipeline = _xevm_pipeline(xegpu_op_level, large_register_file, chip)
         PassManager.parse(pipeline, module.context).run(module.operation)
         return module
 
@@ -123,6 +127,7 @@ def xeas(
     *,
     xegpu_op_level: str = "workgroup",
     large_register_file: bool = True,
+    chip: str = "bmg",
 ) -> bytes:
     """Compile an outlined MLIR kernel into a GPU kernel binary blob.
 
@@ -137,6 +142,7 @@ def xeas(
         source: MLIR text at the ``outlined`` stage.
         xegpu_op_level: Initial XeGPU operation level for the lowering pipeline.
         large_register_file: Enable the large register file IGC option.
+        chip: Target device for the native binary (e.g. ``bmg``, ``pvc``).
 
     Returns:
         The serialized GPU kernel binary as bytes.
@@ -145,6 +151,7 @@ def xeas(
         source,
         xegpu_op_level=xegpu_op_level,
         large_register_file=large_register_file,
+        chip=chip,
     )
     return extract_gpu_binary(module, large_register_file=large_register_file)
 

@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 import torch
@@ -29,11 +27,11 @@ def _counter(count: int, TILE: ct.Constant[int]):
 def _mock_toolchain(monkeypatch):
     monkeypatch.setattr(xpu, "resolve_tool", lambda *_args: "/tileir-to-mlir")
     monkeypatch.setattr(xpu.shutil, "which", lambda name: f"/{name}")
-    monkeypatch.setattr(
-        xpu.importlib, "import_module",
-        lambda name: SimpleNamespace(__file__="/mlir.so"))
+    monkeypatch.setattr(xpu, "_ocloc_identity", lambda path: ("1.0", "igc"))
+    monkeypatch.setattr(xpu, "_mlir_fingerprint", lambda: {"mlir": "1"})
     monkeypatch.setattr(
         xpu, "file_fingerprint", lambda path: f"fingerprint:{path}")
+    xpu._compile_cache_key_cached.cache_clear()
 
 
 def test_compile_cache_key_uses_effective_options(monkeypatch):
@@ -44,6 +42,7 @@ def test_compile_cache_key_uses_effective_options(monkeypatch):
     with xpu.compile_options({"wg_m": 128, "wg_n": 64, "unused": 2}):
         second = xpu.compile_cache_key()
 
+    assert first is not None
     assert first == second
 
 
@@ -62,6 +61,44 @@ def test_compile_cache_key_changes_with_compiler_options(monkeypatch):
 
     assert base != different_block
     assert base != different_registers
+
+
+def test_options_are_validated_and_normalized():
+    options = xpu.normalize_options(
+        {"wg_m": 128, "wg_n": 64, "block_threads": 256})
+
+    assert options.block == (256, 1, 1)
+    with pytest.raises(TypeError, match="must be a bool"):
+        xpu.normalize_options(
+            {"wg_m": 128, "wg_n": 64, "assume_in_bounds": "false"})
+    with pytest.raises(ValueError, match="xegpu_op_level"):
+        xpu.normalize_options(
+            {"wg_m": 128, "wg_n": 64, "xegpu_op_level": "grid"})
+
+
+def test_compile_passes_normalized_options_to_the_toolchain(monkeypatch):
+    observed = {}
+
+    def run_tool(backend, argv, bytecode):
+        observed["argv"] = argv
+        return b"module {}"
+
+    def xeas(mlir, **options):
+        observed["xeas"] = options
+        return b"binary"
+
+    monkeypatch.setattr(xpu, "resolve_tool", lambda *_args: "/tileir-to-mlir")
+    monkeypatch.setattr(xpu, "run_tool", run_tool)
+    monkeypatch.setattr(xpu, "xeas", xeas)
+
+    with xpu.compile_options({"wg_m": 64, "wg_n": 64, "block_threads": 256,
+                              "assume_in_bounds": True}):
+        xpu.compile_tileir(
+            b"bytecode", symbol="kernel", sm_arch=xpu.sm_arch, signature=None)
+
+    assert "known-block-size=256,1,1" in observed["argv"][1]
+    assert "assume-in-bounds=true" in observed["argv"][1]
+    assert observed["xeas"]["chip"] == "bmg"
 
 
 def test_compile_cache_key_requires_ocloc(monkeypatch):

@@ -126,12 +126,13 @@ def test_lower_tileir_uses_cpu_pipeline(monkeypatch):
 
     monkeypatch.setattr(cpu, "run_tool", run_tool)
 
-    assert cpu._lower_tileir(b"bytecode") == b"module {}"
+    assert cpu._lower_tileir(b"bytecode", cpu.Options(True)) == b"module {}"
     assert observed["backend"] == "CPU"
     assert observed["bytecode"] == b"bytecode"
     assert "target=cpu" in observed["argv"][1]
     assert "append-grid-args=true" in observed["argv"][1]
     assert "drop-rounding-modes=true" in observed["argv"][1]
+    assert "assume-in-bounds=true" in observed["argv"][1]
     assert "--convert-memref-args-to-ptr-args" in observed["argv"]
     assert not any(arg.startswith("--mlir-print-ir") for arg in observed["argv"])
 
@@ -171,12 +172,12 @@ def test_compile_cache_key_ignores_thread_count(monkeypatch):
     options = SimpleNamespace(hash=lambda: "options")
     monkeypatch.setattr(
         cpu, "_cpu_compiler",
-        lambda: (None, backend, options, None, None))
+        lambda assume_in_bounds: (None, backend, options, None, None))
     monkeypatch.setattr(
         cpu, "_cpu_identity_modules",
         lambda: (
             "triton-version",
-            SimpleNamespace(__file__="/triton-compiler.py"),
+            SimpleNamespace(__file__="/nonexistent/triton-compiler.py"),
             SimpleNamespace(__file__="/libtriton.so"),
             SimpleNamespace(_find_compiler=lambda language: "/cc"),
             SimpleNamespace(build=SimpleNamespace(impl=None)),
@@ -184,13 +185,24 @@ def test_compile_cache_key_ignores_thread_count(monkeypatch):
     monkeypatch.setattr(cpu, "resolve_tool", lambda *_args: "/tool")
     monkeypatch.setattr(
         cpu, "file_fingerprint", lambda path: f"fingerprint:{path}")
+    cpu._compile_cache_key_cached.cache_clear()
 
     with cpu.compile_options({"num_cpu_threads": 1}):
         first = cpu.compile_cache_key()
     with cpu.compile_options({"num_cpu_threads": 8}):
         second = cpu.compile_cache_key()
+    with cpu.compile_options({"assume_in_bounds": True}):
+        in_bounds = cpu.compile_cache_key()
+    cpu._compile_cache_key_cached.cache_clear()
 
+    assert first is not None
     assert first == second
+    assert first != in_bounds
+
+
+def test_options_reject_non_bool_flags():
+    with pytest.raises(TypeError, match="must be a bool"):
+        cpu.normalize_options({"assume_in_bounds": "false"})
 
 
 @pytest.mark.parametrize(

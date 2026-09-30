@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import functools
-import hashlib
 import os
 import shutil
 import subprocess
@@ -15,22 +13,13 @@ from cuda.tile._cext import default_tile_context
 from cuda.tile._exception import TileCompilerTimeoutError
 
 
-@functools.lru_cache(maxsize=32)
-def _fingerprint_file(path: str, size: int, mtime_ns: int) -> str:
-    del size, mtime_ns
-    digest = hashlib.sha256()
-    with open(path, "rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def file_fingerprint(path: str) -> str:
-    """Return a content digest cached by canonical path, size, and mtime."""
+    """Identify a file by canonical path and stat data, so any rebuild changes it."""
 
     resolved = os.path.realpath(path)
     stat = os.stat(resolved)
-    return _fingerprint_file(resolved, stat.st_size, stat.st_mtime_ns)
+    return (f"{resolved}:{stat.st_dev}:{stat.st_ino}:{stat.st_size}:"
+            f"{stat.st_mtime_ns}")
 
 
 def buildtree_dir() -> str:

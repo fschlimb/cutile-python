@@ -123,3 +123,14 @@ def normalize_dims(value) -> tuple[int, int, int]:
     if not 1 <= len(values) <= 3:
         raise ValueError("launch dimensions must have length 1 to 3")
     return values + (1,) * (3 - len(values))
+
+
+def bool_option(backend: str, options, key: str, default: bool) -> bool:
+    """Read a boolean compile option, rejecting look-alikes such as ``"false"``."""
+
+    value = options.get(key, default)
+    if not isinstance(value, bool):
+        raise TypeError(
+            f"{backend} backend: compile option {key!r} must be a bool, "
+            f"got {value!r}")
+    return value
