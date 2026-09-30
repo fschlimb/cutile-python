@@ -4,10 +4,8 @@
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import functools
-import gc
 import glob
 import hashlib
 import importlib
@@ -18,10 +16,8 @@ import os
 import platform
 import shutil
 import tempfile
-import threading
-import time
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 import cuda.tile as ct
 from cuda.tile.compilation import ArrayConstraint
@@ -29,7 +25,8 @@ from cuda.tile.compilation import ConstantConstraint
 from cuda.tile.compilation import ScalarConstraint
 
 from ._custom import bool_option
-from ._custom import compile_for_launch
+from ._custom import compile_options  # noqa: F401  (backend API)
+from ._custom import current_options
 from ._custom import normalize_dims
 from ._signature import array_device_type
 from ._signature import array_metadata
@@ -39,13 +36,6 @@ from ._toolchain import run_tool
 
 sm_arch = "3000"
 bytecode_version = "13.3"
-
-_tls = threading.local()
-_cache_lock = threading.Lock()
-_launch_cache = {}
-_argument_layout_cache = {}
-
-_ARGUMENT_LAYOUT_CACHE_LIMIT = 128
 
 # Environment variables read by the Triton CPU compiler.
 _COMPILER_ENVIRONMENT = (
@@ -76,20 +66,6 @@ def normalize_options(options: Mapping[str, Any]) -> Options:
         return Options(assume_in_bounds=value.lower() in ("1", "on", "true", "yes"))
     return Options(
         assume_in_bounds=bool_option("CPU", options, "assume_in_bounds", False))
-
-
-@contextlib.contextmanager
-def compile_options(options: dict):
-    previous = getattr(_tls, "options", None)
-    _tls.options = dict(options or {})
-    try:
-        yield
-    finally:
-        _tls.options = previous
-
-
-def _current_options() -> dict:
-    return getattr(_tls, "options", None) or {}
 
 
 @functools.lru_cache(maxsize=1)
@@ -139,7 +115,7 @@ def _cpu_identity_modules():
 
 
 @functools.lru_cache(maxsize=16)
-def _compile_cache_key_cached(environment, options: Options):
+def _compiler_identity(environment, options: Options):
     """Build the CPU compiler identity for one compile environment."""
 
     try:
@@ -192,10 +168,9 @@ def _compile_cache_key_cached(environment, options: Options):
     ).hexdigest()
 
 
-def compile_cache_key():
-    """Identify all CPU toolchain and option inputs affecting compilation."""
+def compiler_identity(options: Options):
+    """Identify all CPU toolchain inputs affecting ``compile`` for ``options``."""
 
-    options = normalize_options(_current_options())
     try:
         *_modules, triton_knobs = _cpu_identity_modules()
     except (AttributeError, ImportError, OSError, TypeError):
@@ -203,7 +178,7 @@ def compile_cache_key():
     if triton_knobs.build.impl is not None:
         return None
     environment = tuple(os.environ.get(name) for name in _COMPILER_ENVIRONMENT)
-    return _compile_cache_key_cached(environment, options)
+    return _compiler_identity(environment, options)
 
 
 def _lower_tileir(bytecode: bytes, options: Options) -> bytes:
@@ -226,15 +201,15 @@ def _lower_tileir(bytecode: bytes, options: Options) -> bytes:
     return output
 
 
-def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
-    del symbol, sm_arch, signature
-    options = normalize_options(_current_options())
+def compile(bytecode: bytes, signature, options: Options) -> bytes:
+    """Compile TileIR bytecode into a shared object via Triton CPU."""
+    del signature
     ir, backend, triton_options, _CPULauncher, _CPUUtils = _cpu_compiler(
         options.assume_in_bounds)
     context = ir.context()
     ir.load_dialects(context)
     backend.load_dialects(context)
-    mlir = _lower_tileir(tileir_bytecode, options)
+    mlir = _lower_tileir(bytecode, options)
     with tempfile.NamedTemporaryFile(suffix=".tttcir") as source:
         source.write(mlir)
         source.flush()
@@ -260,11 +235,7 @@ _SCALAR_TYPES = {
 
 
 def _argument_layout(signature):
-    key = id(signature)
-    cached = _argument_layout_cache.get(key)
-    if cached is not None and cached[0] is signature:
-        return cached[1]
-
+    """Per parameter kind (``None`` for constants) and the Triton signature."""
     kinds = []
     types = []
     for parameter in signature.parameters:
@@ -287,16 +258,11 @@ def _argument_layout(signature):
         types.extend(["*i8", *([index_type] * parameter.ndim * 2)])
         kinds.append("array")
 
-    layout = tuple(kinds), {index: value for index, value in enumerate(types)}
-    if len(_argument_layout_cache) >= _ARGUMENT_LAYOUT_CACHE_LIMIT:
-        _argument_layout_cache.clear()
-    _argument_layout_cache[key] = signature, layout
-    return layout
+    return tuple(kinds), {index: value for index, value in enumerate(types)}
 
 
-def _flatten_arguments(signature, arguments):
+def _flatten_arguments(kinds, arguments):
     values = []
-    kinds, types = _argument_layout(signature)
     for index, (kind, argument) in enumerate(zip(kinds, arguments)):
         if kind is None:
             continue
@@ -310,83 +276,42 @@ def _flatten_arguments(signature, arguments):
                 "expected host memory")
         pointer, shape, strides, _dtype = array_metadata(argument)
         values.extend([pointer, *shape, *strides])
-    return values, types
+    return values
 
 
-_triplet = normalize_dims
+class _Loaded(NamedTuple):
+    kinds: tuple
+    module: Any
+    function: Any
+    launcher: Any
 
 
-def launch(stream, grid, kernel, args):
-    if stream not in (None, 0):
-        synchronize = getattr(stream, "synchronize", None)
-        if synchronize is None:
-            raise TypeError("CPU backend stream must be None, zero, or synchronizable")
-        synchronize()
-
-    compiled = compile_for_launch(kernel, args)
-    return launch_compiled(stream, grid, compiled, args)
-
-
-def benchmark(stream, grid, kernel, args) -> float:
-    if stream not in (None, 0):
-        synchronize = getattr(stream, "synchronize", None)
-        if synchronize is None:
-            raise TypeError("CPU backend stream must be None, zero, or synchronizable")
-        synchronize()
-
-    compiled = compile_for_launch(kernel, args)
-    gc_was_enabled = gc.isenabled()
-    if gc_was_enabled:
-        gc.disable()
-    try:
-        start = time.perf_counter_ns()
-        launch_compiled(stream, grid, compiled, args)
-        elapsed_ns = time.perf_counter_ns() - start
-    finally:
-        if gc_was_enabled:
-            gc.enable()
-    return elapsed_ns / 1_000.0
-
-
-def benchmark_callable(stream, fn, args=()) -> float:
-    if stream not in (None, 0):
-        synchronize = getattr(stream, "synchronize", None)
-        if synchronize is None:
-            raise TypeError("CPU backend stream must be None, zero, or synchronizable")
-        synchronize()
-
-    gc_was_enabled = gc.isenabled()
-    if gc_was_enabled:
-        gc.disable()
-    try:
-        start = time.perf_counter_ns()
-        fn(*args)
-        elapsed_ns = time.perf_counter_ns() - start
-    finally:
-        if gc_was_enabled:
-            gc.enable()
-    return elapsed_ns / 1_000.0
-
-
-def launch_compiled(stream, grid, compiled, args):
-    """Launch a previously compiled binary without compilation/cache lookup."""
-    signature = compiled.signature
-    binary = compiled.binary
-    symbol = compiled.symbol
-    values, triton_signature = _flatten_arguments(signature, args)
+def load(binary: bytes, signature, options: Options) -> _Loaded:
+    """Load the shared object and build a Triton launcher for its signature."""
+    del options
     _ir, _target, _backend, CPULauncher, CPUUtils = _triton_cpu()
-    key = (id(binary), symbol, tuple(triton_signature.values()))
-    with _cache_lock:
-        cached = _launch_cache.get(key)
-        if cached is None:
-            source = SimpleNamespace(signature=triton_signature, constants={})
-            launcher = CPULauncher(source, None)
-            module, function, *_unused = CPUUtils().load_binary(
-                symbol, binary, 0, 0)
-            cached = binary, module, function, launcher
-            _launch_cache[key] = cached
-    _binary, _module, function, launcher = cached
+    kinds, types = _argument_layout(signature)
+    launcher = CPULauncher(SimpleNamespace(signature=types, constants={}), None)
+    module, function, *_unused = CPUUtils().load_binary(
+        signature.symbol, binary, 0, 0)
+    return _Loaded(kinds, module, function, launcher)
+
+
+def synchronize(stream):
+    """Wait for work queued on ``stream``; CPU kernels run synchronously."""
+    if stream not in (None, 0):
+        stream_synchronize = getattr(stream, "synchronize", None)
+        if stream_synchronize is None:
+            raise TypeError("CPU backend stream must be None, zero, or synchronizable")
+        stream_synchronize()
+
+
+def launch(loaded: _Loaded, stream, grid, args):
+    """Run a loaded kernel; ``num_cpu_threads`` sets the worker count."""
+    synchronize(stream)
+    values = _flatten_arguments(loaded.kinds, args)
     metadata = SimpleNamespace(
-        num_cpu_threads=int(_current_options().get("num_cpu_threads", 0)))
-    x, y, z = _triplet(grid)
-    launcher(x, y, z, 0, function, metadata, None, None, None, *values)
+        num_cpu_threads=int(current_options().get("num_cpu_threads", 0)))
+    x, y, z = normalize_dims(grid)
+    loaded.launcher(x, y, z, 0, loaded.function, metadata, None, None, None,
+                    *values)

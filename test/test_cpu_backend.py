@@ -34,26 +34,13 @@ def _arguments():
 def test_signature_flattens_arrays_and_omits_constants():
     signature = build_signature(_vector_add, _arguments())
 
-    values, types = cpu._flatten_arguments(signature, _arguments())
+    kinds, types = cpu._argument_layout(signature)
+    values = cpu._flatten_arguments(kinds, _arguments())
 
     assert list(types.values()) == ["*i8", "i32", "i32"] * 3
     assert values[1:3] == [64, 1]
     assert values[4:6] == [64, 1]
     assert values[7:9] == [64, 1]
-
-
-def test_flatten_arguments_reuses_signature_layout():
-    first_arguments = _arguments()
-    second_arguments = _arguments()
-    signature = build_signature(_vector_add, first_arguments)
-    cpu._argument_layout_cache.clear()
-
-    first_values, first_types = cpu._flatten_arguments(signature, first_arguments)
-    second_values, second_types = cpu._flatten_arguments(signature, second_arguments)
-
-    assert first_types is second_types
-    assert first_values[0] == first_arguments[0].ctypes.data
-    assert second_values[0] == second_arguments[0].ctypes.data
 
 
 def test_signature_uses_actual_array_alignment():
@@ -113,7 +100,8 @@ def test_flatten_arguments_rejects_non_host_arrays():
     device_tensor = torch.empty(64, dtype=torch.float32, device="meta")
 
     with pytest.raises(ValueError, match="expected host memory"):
-        cpu._flatten_arguments(signature, (device_tensor, *arguments[1:]))
+        cpu._flatten_arguments(
+            cpu._argument_layout(signature)[0], (device_tensor, *arguments[1:]))
 
 
 def test_lower_tileir_uses_cpu_pipeline(monkeypatch):
@@ -158,15 +146,15 @@ def test_triton_cpu_preserves_nested_import_error(monkeypatch):
         cpu._triton_cpu()
 
 
-def test_backend_registration_discovers_compile_cache_key():
+def test_backend_registration_accepts_builtin_cpu():
     _backend.set_backend("cpu")
     try:
-        assert _backend.get_compile_cache_key_fn() is cpu.compile_cache_key
+        assert _backend.get_backend() is cpu
     finally:
         _backend.clear_backend()
 
 
-def test_compile_cache_key_ignores_thread_count(monkeypatch):
+def test_compiler_identity_depends_on_options_only(monkeypatch):
     backend = SimpleNamespace(
         cpu_arch="x86_64", cpu_name="cpu", cpu_features={"feature"})
     options = SimpleNamespace(hash=lambda: "options")
@@ -185,15 +173,13 @@ def test_compile_cache_key_ignores_thread_count(monkeypatch):
     monkeypatch.setattr(cpu, "resolve_tool", lambda *_args: "/tool")
     monkeypatch.setattr(
         cpu, "file_fingerprint", lambda path: f"fingerprint:{path}")
-    cpu._compile_cache_key_cached.cache_clear()
+    cpu._compiler_identity.cache_clear()
 
-    with cpu.compile_options({"num_cpu_threads": 1}):
-        first = cpu.compile_cache_key()
-    with cpu.compile_options({"num_cpu_threads": 8}):
-        second = cpu.compile_cache_key()
-    with cpu.compile_options({"assume_in_bounds": True}):
-        in_bounds = cpu.compile_cache_key()
-    cpu._compile_cache_key_cached.cache_clear()
+    first = cpu.compiler_identity(cpu.normalize_options({"num_cpu_threads": 1}))
+    second = cpu.compiler_identity(cpu.normalize_options({"num_cpu_threads": 8}))
+    in_bounds = cpu.compiler_identity(
+        cpu.normalize_options({"assume_in_bounds": True}))
+    cpu._compiler_identity.cache_clear()
 
     assert first is not None
     assert first == second
@@ -205,15 +191,7 @@ def test_options_reject_non_bool_flags():
         cpu.normalize_options({"assume_in_bounds": "false"})
 
 
-@pytest.mark.parametrize(
-    "grid, expected",
-    [(7, (7, 1, 1)), ((7, 3), (7, 3, 1)), ((7, 3, 2), (7, 3, 2))],
-)
-def test_triplet(grid, expected):
-    assert cpu._triplet(grid) == expected
-
-
-def test_launch_reuses_triton_launcher(monkeypatch):
+def test_load_builds_launcher_once(monkeypatch):
     arguments = _arguments()
     calls = []
 
@@ -233,17 +211,16 @@ def test_launch_reuses_triton_launcher(monkeypatch):
         cpu, "_triton_cpu",
         lambda: (None, None, None, Launcher, Utils),
     )
-    monkeypatch.setattr(
-        ct, "compile_kernel",
-        lambda kernel, signature: (b"object", signature.symbol))
-    cpu._launch_cache.clear()
+    signature = build_signature(_vector_add, arguments)
 
-    cpu.launch(None, (4,), _vector_add, arguments)
-    cpu.launch(None, (4,), _vector_add, arguments)
+    loaded = cpu.load(b"object", signature, cpu.Options(False))
+    cpu.launch(loaded, None, (4,), arguments)
+    with _backend.compile_options({"num_cpu_threads": 3}):
+        cpu.launch(loaded, None, (4,), arguments)
 
     assert [call[0] for call in calls].count("create") == 1
     assert [call[0] for call in calls].count("load") == 1
     launches = [call for call in calls if call[0] == "launch"]
     assert len(launches) == 2
     assert launches[0][1][:5] == (4, 1, 1, 0, 1234)
-    assert isinstance(launches[0][1][5], SimpleNamespace)
+    assert [args[5].num_cpu_threads for _, args in launches] == [0, 3]

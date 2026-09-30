@@ -296,26 +296,6 @@ class KernelSignature:
         object.__setattr__(self, "calling_convention", calling_convention)
         object.__setattr__(self, "symbol", symbol)
 
-    def mangled_symbol(self, function_name: str) -> str:
-        """
-        Returns the mangled symbol name derived from `function_name` and this signature.
-
-        Args:
-            function_name(str):
-                Function name to use as the base of the mangled symbol.
-        Returns:
-            str
-        """
-        # Memoized on the instance; the result only depends on immutable fields.
-        memo = self.__dict__.get("_mangled_symbol_memo")
-        if memo is not None and memo[0] == function_name:
-            return memo[1]
-
-        from cuda.tile.compilation._name_mangling import mangle_kernel_name
-        symbol = mangle_kernel_name(function_name, self)
-        object.__setattr__(self, "_mangled_symbol_memo", (function_name, symbol))
-        return symbol
-
     def with_mangled_symbol(self, function_name: str) -> "KernelSignature":
         """
         Returns a copy of `self` with the `symbol` attribute replaced with a mangled name.
@@ -326,7 +306,9 @@ class KernelSignature:
         Returns:
             KernelSignature
         """
-        return self.with_symbol(self.mangled_symbol(function_name))
+        from cuda.tile.compilation._name_mangling import mangle_kernel_name
+        symbol = mangle_kernel_name(function_name, self)
+        return self.with_symbol(symbol)
 
     def with_symbol(self, symbol: str | None) -> "KernelSignature":
         """

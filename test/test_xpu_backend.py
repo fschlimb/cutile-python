@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
@@ -9,9 +10,12 @@ pytest.importorskip("mlir.ir", reason="needs the MLIR Python bindings")
 pytest.importorskip("cuda.tile._level_zero", reason="needs the Level Zero extension")
 
 import cuda.tile as ct  # noqa: E402
+from cuda.tile import _backend  # noqa: E402
 from cuda.tile._backend import xpu  # noqa: E402
 from cuda.tile._backend._signature import build_signature  # noqa: E402
 from mlir import ir  # noqa: E402
+
+_OPTIONS = {"wg_m": 128, "wg_n": 64}
 
 
 @ct.kernel
@@ -31,52 +35,54 @@ def _mock_toolchain(monkeypatch):
     monkeypatch.setattr(xpu, "_mlir_fingerprint", lambda: {"mlir": "1"})
     monkeypatch.setattr(
         xpu, "file_fingerprint", lambda path: f"fingerprint:{path}")
-    xpu._compile_cache_key_cached.cache_clear()
+    xpu._compiler_identity.cache_clear()
 
 
-def test_compile_cache_key_uses_effective_options(monkeypatch):
+def _identity(**options):
+    return xpu.compiler_identity(xpu.normalize_options({**_OPTIONS, **options}))
+
+
+def test_xpu_module_is_a_backend():
+    _backend.set_backend("xpu")
+    try:
+        assert _backend.get_backend() is xpu
+    finally:
+        _backend.clear_backend()
+
+
+def test_options_ignore_unknown_keys():
+    assert (xpu.normalize_options({**_OPTIONS, "unused": 1})
+            == xpu.normalize_options({**_OPTIONS, "unused": 2}))
+
+
+def test_compiler_identity_changes_with_compiler_options(monkeypatch):
     _mock_toolchain(monkeypatch)
 
-    with xpu.compile_options({"wg_m": 128, "wg_n": 64, "unused": 1}):
-        first = xpu.compile_cache_key()
-    with xpu.compile_options({"wg_m": 128, "wg_n": 64, "unused": 2}):
-        second = xpu.compile_cache_key()
+    base = _identity()
 
-    assert first is not None
-    assert first == second
+    assert base is not None
+    assert base != _identity(block_threads=256)
+    assert base != _identity(large_register_file=False)
 
 
-def test_compile_cache_key_changes_with_compiler_options(monkeypatch):
+def test_compiler_identity_requires_ocloc(monkeypatch):
     _mock_toolchain(monkeypatch)
+    monkeypatch.setattr(xpu.shutil, "which", lambda name: None)
 
-    with xpu.compile_options({"wg_m": 128, "wg_n": 64}):
-        base = xpu.compile_cache_key()
-    with xpu.compile_options({
-            "wg_m": 128, "wg_n": 64, "block_threads": 256}):
-        different_block = xpu.compile_cache_key()
-    with xpu.compile_options({
-            "wg_m": 128, "wg_n": 64,
-            "large_register_file": False}):
-        different_registers = xpu.compile_cache_key()
-
-    assert base != different_block
-    assert base != different_registers
+    assert _identity() is None
 
 
 def test_options_are_validated_and_normalized():
-    options = xpu.normalize_options(
-        {"wg_m": 128, "wg_n": 64, "block_threads": 256})
+    options = xpu.normalize_options({**_OPTIONS, "block_threads": 256})
 
     assert options.block == (256, 1, 1)
     with pytest.raises(TypeError, match="must be a bool"):
-        xpu.normalize_options(
-            {"wg_m": 128, "wg_n": 64, "assume_in_bounds": "false"})
+        xpu.normalize_options({**_OPTIONS, "assume_in_bounds": "false"})
     with pytest.raises(ValueError, match="xegpu_op_level"):
-        xpu.normalize_options(
-            {"wg_m": 128, "wg_n": 64, "xegpu_op_level": "grid"})
+        xpu.normalize_options({**_OPTIONS, "xegpu_op_level": "grid"})
 
 
-def test_compile_passes_normalized_options_to_the_toolchain(monkeypatch):
+def test_compile_passes_options_to_the_toolchain_in_an_mlir_context(monkeypatch):
     observed = {}
 
     def run_tool(backend, argv, bytecode):
@@ -84,62 +90,38 @@ def test_compile_passes_normalized_options_to_the_toolchain(monkeypatch):
         return b"module {}"
 
     def xeas(mlir, **options):
+        assert ir.Context.current is not None
         observed["xeas"] = options
         return b"binary"
 
     monkeypatch.setattr(xpu, "resolve_tool", lambda *_args: "/tileir-to-mlir")
     monkeypatch.setattr(xpu, "run_tool", run_tool)
     monkeypatch.setattr(xpu, "xeas", xeas)
+    options = xpu.normalize_options(
+        {**_OPTIONS, "block_threads": 256, "assume_in_bounds": True})
 
-    with xpu.compile_options({"wg_m": 64, "wg_n": 64, "block_threads": 256,
-                              "assume_in_bounds": True}):
-        xpu.compile_tileir(
-            b"bytecode", symbol="kernel", sm_arch=xpu.sm_arch, signature=None)
-
+    assert xpu.compile(b"bytecode", None, options) == b"binary"
     assert "known-block-size=256,1,1" in observed["argv"][1]
     assert "assume-in-bounds=true" in observed["argv"][1]
     assert observed["xeas"]["chip"] == "bmg"
 
 
-def test_compile_cache_key_requires_ocloc(monkeypatch):
-    _mock_toolchain(monkeypatch)
-    monkeypatch.setattr(xpu.shutil, "which", lambda name: None)
-
-    with xpu.compile_options({"wg_m": 128, "wg_n": 64}):
-        assert xpu.compile_cache_key() is None
-
-
-def test_compile_tileir_provides_mlir_context(monkeypatch):
-    def xeas(mlir, **_options):
-        assert ir.Context.current is not None
-        return b"binary"
-
-    monkeypatch.setattr(xpu, "resolve_tool", lambda *_args: "/tileir-to-mlir")
-    monkeypatch.setattr(xpu, "run_tool", lambda *_args: b"module {}")
-    monkeypatch.setattr(xpu, "xeas", xeas)
-
-    with xpu.compile_options({"wg_m": 64, "wg_n": 64}):
-        binary = xpu.compile_tileir(
-            b"bytecode", symbol="kernel", sm_arch=xpu.sm_arch, signature=None)
-
-    assert binary == b"binary"
-
-
-def test_launch_uses_compiled_symbol_and_option_block(monkeypatch):
+def test_launch_uses_the_compiled_block_and_symbol(monkeypatch):
     launches = []
-    monkeypatch.setattr(
-        ct, "compile_kernel", lambda kernel, sig: (b"binary", sig.symbol))
     monkeypatch.setattr(
         xpu, "launch_level_zero_module_kernel",
         lambda *args: launches.append(args))
+    signature = build_signature(_counter, (7, 4))
+    options = xpu.normalize_options(
+        {"wg_m": 64, "wg_n": 32, "sg_m": 32, "sg_n": 16})
 
-    options = {"wg_m": 64, "wg_n": 32, "sg_m": 32, "sg_n": 16}
-    with xpu.compile_options(options):
-        xpu.launch(None, (2,), _counter, (7, 4))
+    loaded = xpu.load(b"binary", signature, options)
+    with _backend.compile_options(_OPTIONS):
+        xpu.launch(loaded, None, (2,), (7, 4))
 
     [(binary, symbol, arguments, grid, block)] = launches
     assert binary == b"binary"
-    assert symbol == build_signature(_counter, (7, 4)).symbol
+    assert symbol == signature.symbol
     assert arguments == [np.int32(7).tobytes()]
     assert grid == (2, 1, 1)
     assert block == (64, 1, 1)

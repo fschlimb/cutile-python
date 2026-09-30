@@ -127,9 +127,8 @@ def _timing_fns(benchmark_fn=None):
 
     if benchmark_fn is not None:
         return benchmark_fn, lambda: None
-    benchmark = _backend.get_benchmark_fn()
-    if benchmark is not None:
-        return benchmark, lambda: None
+    if _backend.get_backend() is not None:
+        return _backend.benchmark, lambda: None
     return _benchmark, _synchronize_context
 
 
@@ -257,12 +256,10 @@ def exhaustive_search(
                 hints = hints_fn(cfg) if hints_fn is not None else {}
                 updated_kernel = (
                     kernel.replace_hints(**hints) if kernel is not None else None)
-                timing_kwargs = {} if benchmark_fn is None else {
-                    "benchmark_fn": benchmark_fn}
                 avg_us, error_bar, repeats = _time_us(
                     stream, grid, updated_kernel,
                     lambda _cfg=cfg: args_fn(_cfg),
-                    **timing_kwargs,
+                    benchmark_fn=benchmark_fn,
                 )
         except Exception as e:
             err_type = type(e).__name__

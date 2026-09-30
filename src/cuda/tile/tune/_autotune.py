@@ -13,8 +13,6 @@ from types import MappingProxyType
 from typing import Any
 
 from cuda.tile import _backend
-from cuda.tile import _execution
-from cuda.tile._backend._custom import compile_for_launch
 from cuda.tile._backend._signature import array_metadata
 from cuda.tile.tune._tune import exhaustive_search
 
@@ -217,11 +215,7 @@ class AutotunedKernel(_Autotuned):
     def _options_context_factory(options):
         if options is None:
             return None
-        factory = _backend.get_compile_options_fn()
-        if factory is None:
-            raise RuntimeError(
-                "active backend does not provide compile_options()")
-        return partial(factory, options)
+        return partial(_backend.compile_options, options)
 
     def _tune(self, stream, args):
         index_by_id = self._index_by_id()
@@ -278,18 +272,17 @@ class AutotunedKernel(_Autotuned):
         grid, options = self._plan_for(index, args)
         full_args = self._injectors[index](args)
         kernel = self._kernels[index]
-        launch_compiled_fn = _backend.get_launch_compiled_fn()
         context_factory = self._options_context_factory(options)
-        if launch_compiled_fn is None:
-            target = kernel
+        if _backend.get_backend() is None:
+            launch_fn, target = _backend.launch, kernel
+        elif context_factory is None:
+            launch_fn = _backend.launch_compiled
+            target = _backend.compile_for_launch(kernel, full_args)
         else:
-            if context_factory is None:
-                target = compile_for_launch(kernel, full_args)
-            else:
-                with context_factory():
-                    target = compile_for_launch(kernel, full_args)
-        self._prepared = (launch_compiled_fn or _execution.launch, grid, target,
-                          full_args, context_factory)
+            launch_fn = _backend.launch_compiled
+            with context_factory():
+                target = _backend.compile_for_launch(kernel, full_args)
+        self._prepared = (launch_fn, grid, target, full_args, context_factory)
         return self._configs[index]
 
     def launch_prepared(self, stream, /):
@@ -314,11 +307,11 @@ class AutotunedKernel(_Autotuned):
         index = self._resolve(stream, args)
         grid, options = self._plan_for(index, args)
         if options is None:
-            return _execution.launch(stream, grid, self._kernels[index],
-                                     self._injectors[index](args))
+            return _backend.launch(stream, grid, self._kernels[index],
+                                   self._injectors[index](args))
         with self._options_context_factory(options)():
-            return _execution.launch(stream, grid, self._kernels[index],
-                                     self._injectors[index](args))
+            return _backend.launch(stream, grid, self._kernels[index],
+                                   self._injectors[index](args))
 
 
 class AutotunedFunction(_Autotuned):
@@ -357,10 +350,6 @@ class AutotunedFunction(_Autotuned):
         return prepared
 
     def _tune(self, args, kwargs):
-        timer = _backend.get_benchmark_callable_fn()
-        if timer is None:
-            raise RuntimeError(
-                "active backend does not provide benchmark_callable()")
         index_by_id = self._index_by_id()
         built: dict[int, Any] = {}
 
@@ -378,8 +367,8 @@ class AutotunedFunction(_Autotuned):
             args_fn=args_fn,
             hints_fn=None,
             quiet=self._quiet,
-            benchmark_fn=lambda stream, _grid, _kernel, bench_args: timer(
-                stream, bench_args[0], ()),
+            benchmark_fn=lambda stream, _grid, _kernel, bench_args: (
+                _backend.benchmark_callable(stream, bench_args[0])),
         )
         index = index_by_id[id(result.best.config)]
         return index, built[index]

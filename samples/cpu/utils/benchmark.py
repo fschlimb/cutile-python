@@ -5,8 +5,7 @@ import gc
 import time
 from math import ceil
 
-import cuda.tile as ct
-from cuda.tile._backend import cpu
+from cuda.tile._backend import compile_for_launch, cpu, launch_compiled
 
 
 _WARMUP_ITER_GUESS = 5
@@ -80,9 +79,9 @@ def report_benchmark(f, tuple_of_args, *, kernel=None, grid=None,
 
     kernel_args = tuple(kernel_args)
     with cpu.compile_options(dict(options or {})):
-        compiled = ct.compile_kernel_for_launch(kernel, kernel_args)
+        compiled = compile_for_launch(kernel, kernel_args)
 
         def direct_call():
-            return ct.launch_compiled(None, grid, compiled, kernel_args)
+            return launch_compiled(None, grid, compiled, kernel_args)
 
         return _report_benchmark(direct_call, ())

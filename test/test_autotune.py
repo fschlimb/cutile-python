@@ -67,12 +67,12 @@ def _fake_runtime(monkeypatch, events=None):
                 events.append(("exit", options))
 
     monkeypatch.setattr(autotune_mod, "exhaustive_search", search)
-    monkeypatch.setattr(autotune_mod, "compile_for_launch", compile_kernel)
-    monkeypatch.setattr(
-        autotune_mod._backend, "get_launch_compiled_fn", lambda: launch_compiled)
-    monkeypatch.setattr(
-        autotune_mod._backend, "get_compile_options_fn", lambda: compile_options)
-    monkeypatch.setattr(autotune_mod._execution, "launch", launch)
+    backend = autotune_mod._backend
+    monkeypatch.setattr(backend, "get_backend", lambda: object())
+    monkeypatch.setattr(backend, "compile_for_launch", compile_kernel)
+    monkeypatch.setattr(backend, "launch_compiled", launch_compiled)
+    monkeypatch.setattr(backend, "compile_options", compile_options)
+    monkeypatch.setattr(backend, "launch", launch)
     return tuned, launched
 
 
@@ -245,7 +245,7 @@ def test_autotune_factory_reuses_prepared_multi_kernel_operation(monkeypatch):
 
         return prepared
 
-    def timer(stream, prepared, args):
+    def timer(stream, prepared, args=()):
         timer_calls.append(prepared)
         prepared(*args)
         return 1.0
@@ -257,8 +257,7 @@ def test_autotune_factory_reuses_prepared_multi_kernel_operation(monkeypatch):
         return SimpleNamespace(best=SimpleNamespace(config=config))
 
     monkeypatch.setattr(autotune_mod, "exhaustive_search", search)
-    monkeypatch.setattr(
-        autotune_mod._backend, "get_benchmark_callable_fn", lambda: timer)
+    monkeypatch.setattr(autotune_mod._backend, "benchmark_callable", timer)
 
     autotuned = autotune(
         configs=[
@@ -291,8 +290,8 @@ def test_factory_rebuilds_operation_for_different_storage(monkeypatch):
     monkeypatch.setattr(autotune_mod, "exhaustive_search", search)
     monkeypatch.setattr(
         autotune_mod._backend,
-        "get_benchmark_callable_fn",
-        lambda: lambda stream, fn, args: 1.0,
+        "benchmark_callable",
+        lambda stream, fn, args=(): 1.0,
     )
     autotuned = autotune(configs=[Config({})])(factory)
     first = torch.empty(16)

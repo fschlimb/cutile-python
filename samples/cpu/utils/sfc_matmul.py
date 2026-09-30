@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import cuda.tile as ct
 import torch
-from cuda.tile._backend import cpu
+from cuda.tile._backend import compile_for_launch, cpu, launch_compiled
 from cuda.tile._backend._signature import build_signature
 from cuda.tile.compilation import ArrayConstraint, KernelSignature
 
@@ -464,7 +464,7 @@ class PreparedSFCMatmul:
         )
         with context:
             for grid, compiled, kernel_args in self._launches:
-                ct.launch_compiled(None, grid, compiled, kernel_args)
+                launch_compiled(None, grid, compiled, kernel_args)
         return self._output
 
 
@@ -571,7 +571,7 @@ def prepare_sfc_matmul(
             launches.append(
                 (
                     (blocks_m * blocks_n, 1, 1),
-                    cpu.compile_for_launch(
+                    compile_for_launch(
                         matmul_kernel,
                         kernel_args,
                         signature_builder=_build_matmul_signature,
@@ -591,7 +591,7 @@ def prepare_sfc_matmul(
             launches.append(
                 (
                     (M // finish_block_size_m, 1, 1),
-                    ct.compile_kernel_for_launch(finish_kernel, finish_args),
+                    compile_for_launch(finish_kernel, finish_args),
                     finish_args,
                 )
             )
@@ -600,7 +600,7 @@ def prepare_sfc_matmul(
             launches.append(
                 (
                     (blocks_m, 1, 1),
-                    ct.compile_kernel_for_launch(
+                    compile_for_launch(
                         _finish_softmax_kernel, finish_args
                     ),
                     finish_args,

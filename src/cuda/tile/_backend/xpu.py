@@ -13,7 +13,6 @@ Select the backend and supply the mandatory tuning parameters::
     with xpu.compile_options({"wg_m": 128, "wg_n": 128}):
         ct.launch(stream, grid, matmul_kernel, args)
 """
-import contextlib
 import dataclasses
 import functools
 import hashlib
@@ -23,15 +22,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 import numpy as np
 
 import cuda.tile as ct
 from cuda.tile.compilation import KernelSignature, ScalarConstraint, ConstantConstraint
 
-from ._custom import bool_option, compile_for_launch, normalize_dims
+from ._custom import bool_option, normalize_dims
+from ._custom import compile_options  # noqa: F401  (backend API)
 from ._toolchain import file_fingerprint, resolve_tool, run_tool
 
 
@@ -58,9 +57,8 @@ def _arch(arch: str) -> tuple[str, str]:
     return _ARCHS[arch]
 
 
-# Reporting a target here makes `get_sm_arch_override()` short-circuit, so
-# cuTile never probes a CUDA device (which would dlopen libcuda) when this
-# backend is active.
+# Pinning the target means cuTile never probes a CUDA device (which would
+# dlopen libcuda) when this backend is active.
 sm_arch, _CHIP = _arch(os.environ.get("CUTILE_XPU_ARCH", _DEFAULT_ARCH))
 
 # Pin the TileIR bytecode version so cuTile does not probe the `tileiras`
@@ -68,56 +66,6 @@ sm_arch, _CHIP = _arch(os.environ.get("CUTILE_XPU_ARCH", _DEFAULT_ARCH))
 bytecode_version = "13.3"
 
 _SUBGROUP_SIZE = 16
-
-# Per-launch compiler options. `compile_options(...)` sets extra values passed
-# to the launcher, scoped to the enclosing `ct.launch` call (it runs on the
-# same thread, so a thread-local keeps concurrent calls isolated).
-_tls = threading.local()
-
-
-@contextlib.contextmanager
-def compile_options(options: dict):
-    """Provide tuning parameters for the XPU compile, per kernel launch.
-
-    ``options`` is a flat dict scoped to launches inside the ``with`` block.
-    Its keys are forwarded as ``xeas`` keyword arguments or used to derive the
-    launch block.
-
-    The work-group tiles ``wg_m``/``wg_n`` must be set explicitly in
-    ``options``. Combined with ``sg_m``/``sg_n`` and the fixed subgroup size of
-    16 they derive the launch block
-    ``((wg_m // sg_m) * (wg_n // sg_n) * 16, 1, 1)``.
-
-        Accepted options:
-
-        =================== ========== ========================== ==========================
-        key                 kernels    required?                  meaning
-        =================== ========== ========================== ==========================
-        block_threads       all        optional                   launch block (overrides derived)
-        wg_m, wg_n          all        yes                        work-group tile sizes
-        sg_m, sg_n          all        optional                   subgroup tile size
-        assume_in_bounds    all        optional                   mark transfers in-bounds
-        xegpu_op_level      all        optional                   initial XeGPU op level
-        large_register_file all        optional                   enable large register file
-        =================== ========== ========================== ==========================
-
-    Example::
-
-        with xpu.compile_options({"wg_m": 128, "wg_n": 128}):
-            ct.launch(stream, grid, matmul_kernel, args)
-    """
-    prev = getattr(_tls, "options", None)
-    _tls.options = dict(options or {})
-    try:
-        yield
-    finally:
-        _tls.options = prev
-
-
-def _current_options() -> dict:
-    """Options of the innermost enclosing :func:`compile_options` block."""
-    return getattr(_tls, "options", None) or {}
-
 
 # Launch block used when no subgroup tile sizes are given.
 _DEFAULT_BLOCK = (512, 1, 1)
@@ -150,8 +98,6 @@ def _launch_block(options: Mapping[str, Any]) -> tuple[int, int, int]:
     return ((wg_m // sg_m) * (wg_n // sg_n) * _SUBGROUP_SIZE, 1, 1)
 
 
-_triplet = normalize_dims
-
 _XEGPU_OP_LEVELS = ("workgroup", "subgroup", "lane")
 
 
@@ -166,7 +112,23 @@ class Options:
 
 
 def normalize_options(options: Mapping[str, Any]) -> Options:
-    """Validate and normalize the options of a :func:`compile_options` block."""
+    """Validate and normalize the options of a ``compile_options`` block.
+
+    ``wg_m``/``wg_n`` are required. Combined with ``sg_m``/``sg_n`` and the
+    fixed subgroup size of 16 they derive the launch block
+    ``((wg_m // sg_m) * (wg_n // sg_n) * 16, 1, 1)``.
+
+    =================== ========== ================================
+    key                 required?  meaning
+    =================== ========== ================================
+    block_threads       optional   launch block (overrides derived)
+    wg_m, wg_n          yes        work-group tile sizes
+    sg_m, sg_n          optional   subgroup tile size
+    assume_in_bounds    optional   mark transfers in-bounds
+    xegpu_op_level      optional   initial XeGPU op level
+    large_register_file optional   enable large register file
+    =================== ========== ================================
+    """
     xegpu_op_level = options.get("xegpu_op_level", "workgroup")
     if xegpu_op_level not in _XEGPU_OP_LEVELS:
         raise ValueError(
@@ -200,7 +162,7 @@ def _mlir_fingerprint() -> dict[str, str]:
 
 
 @functools.lru_cache(maxsize=32)
-def _compile_cache_key_cached(options: Options, tool: str, ocloc: str):
+def _compiler_identity(options: Options, tool: str, ocloc: str):
     """Build the XPU compiler identity for normalized effective options."""
 
     try:
@@ -223,10 +185,9 @@ def _compile_cache_key_cached(options: Options, tool: str, ocloc: str):
     ).hexdigest()
 
 
-def compile_cache_key():
-    """Identify all XPU toolchain and option inputs affecting compilation."""
+def compiler_identity(options: Options):
+    """Identify all XPU toolchain inputs affecting ``compile`` for ``options``."""
 
-    options = normalize_options(_current_options())
     ocloc = shutil.which("ocloc")
     try:
         tool = resolve_tool(
@@ -235,7 +196,7 @@ def compile_cache_key():
         return None
     if ocloc is None:
         return None
-    return _compile_cache_key_cached(
+    return _compiler_identity(
         options, os.path.realpath(tool), os.path.realpath(ocloc))
 
 
@@ -271,18 +232,16 @@ def _run_tileir_to_mlir(tool: str, bytecode: bytes, options: Options) -> str:
     return mlir
 
 
-def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
+def compile(bytecode: bytes, signature, options: Options) -> bytes:
     """Compile TileIR bytecode into an Xe device binary blob.
 
     Runs the native tileir-to-mlir tool (overridable with
     ``CUTILE_XPU_TILEIR_TO_MLIR``) followed by the XeVM pipeline in
     :func:`~cuda.tile._backend.xeas.xeas`.
     """
-    # symbol/sm_arch/signature are part of the backend hook protocol; the Xe
-    # toolchain derives everything it needs from the bytecode itself.
+    del signature
     tool = resolve_tool("XPU", "CUTILE_XPU_TILEIR_TO_MLIR", "tileir-to-mlir")
-    options = normalize_options(_current_options())
-    mlir = _run_tileir_to_mlir(tool, tileir_bytecode, options)
+    mlir = _run_tileir_to_mlir(tool, bytecode, options)
     with ir.Context():
         return xeas(mlir, xegpu_op_level=options.xegpu_op_level,
                     large_register_file=options.large_register_file,
@@ -333,33 +292,34 @@ def _runtime_kernel_args(signature: KernelSignature, args: tuple) -> list:
     return flat
 
 
-def launch(stream, grid, kernel, args):
-    """Compile and synchronously launch a kernel on the XPU.
-
-    Compilation goes through :func:`compile_tileir`; the resulting device binary
-    is loaded and run by the Level Zero runtime with the runtime arguments only
-    (compile-time constants are baked into the binary).
-    """
-    compiled = compile_for_launch(kernel, args)
-    return launch_compiled(stream, grid, compiled, args)
+class _Loaded(NamedTuple):
+    binary: bytes
+    signature: KernelSignature
+    block: tuple[int, int, int]
 
 
-def launch_compiled(stream, grid, compiled, args):
-    """Launch a previously compiled binary without compilation/cache lookup.
+def load(binary: bytes, signature: KernelSignature, options: Options) -> _Loaded:
+    """Bind a binary to the launch block it was compiled for."""
+    return _Loaded(binary, signature, options.block)
 
-    Must run under the ``compile_options`` the binary was compiled with: the
-    launch block is baked into the binary.
-    """
-    runtime_args = _runtime_kernel_args(compiled.signature, args)
-    block = normalize_options(_current_options()).block
+
+def synchronize(stream):
+    """Wait for work queued on ``stream``; XPU launches block until done."""
+    if stream is not None:
+        stream.synchronize()
+
+
+def launch(loaded: _Loaded, stream, grid, args):
+    """Run a loaded kernel synchronously through the Level Zero runtime."""
+    runtime_args = _runtime_kernel_args(loaded.signature, args)
 
     # The Level Zero runtime enqueues onto its own immediate command list, which
     # is unordered with respect to ``stream``. Drain the caller's pending work
     # (e.g. the tensor initialisation) first, otherwise it can land after the
     # kernel and overwrite its results. The launch below blocks until the kernel
     # completed, so ordering is restored on the way out.
-    if stream is not None:
-        stream.synchronize()
+    synchronize(stream)
 
     launch_level_zero_module_kernel(
-        compiled.binary, compiled.symbol, runtime_args, _triplet(grid), block)
+        loaded.binary, loaded.signature.symbol, runtime_args,
+        normalize_dims(grid), loaded.block)
