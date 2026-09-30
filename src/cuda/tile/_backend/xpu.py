@@ -66,20 +66,6 @@ sm_arch = _arch_id(os.environ.get("CUTILE_XPU_ARCH", _DEFAULT_ARCH))
 # compiler (which requires a CUDA toolkit) to auto-detect it.
 bytecode_version = "13.3"
 
-# Single process-wide MLIR context, created once and reused by every launch.
-_context_lock = threading.Lock()
-_mlir_context = None
-
-
-def _xe_context():
-    """Return the shared MLIR context, creating it on first use."""
-    global _mlir_context
-    with _context_lock:
-        if _mlir_context is None:
-            _mlir_context = ir.Context()
-    return _mlir_context
-
-
 _SUBGROUP_SIZE = 16
 
 # Per-launch compiler options. `compile_options(...)` sets extra values passed
@@ -269,8 +255,8 @@ def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
     tool = resolve_tool("XPU", "CUTILE_XPU_TILEIR_TO_MLIR", "tileir-to-mlir")
     options = _current_options()
     mlir = _run_tileir_to_mlir(tool, tileir_bytecode, options)
-    # print(mlir)
-    return xeas(mlir, **_xeas_options(options))
+    with ir.Context():
+        return xeas(mlir, **_xeas_options(options))
 
 
 # ABI type of a runtime scalar, keyed by its signature dtype.
@@ -280,6 +266,7 @@ _SCALAR_NUMPY_DTYPE = {
     ct.uint8: np.uint8, ct.uint16: np.uint16,
     ct.uint32: np.uint32, ct.uint64: np.uint64,
     ct.float32: np.float32, ct.float64: np.float64,
+    ct.bool_: np.bool_,
 }
 
 
@@ -299,10 +286,14 @@ def _runtime_kernel_args(signature: KernelSignature, args: tuple) -> list:
     """
     torch = _torch_api()
     flat = []
-    for arg, param in zip(args, signature.parameters):
+    for index, (arg, param) in enumerate(zip(args, signature.parameters)):
         if isinstance(param, ConstantConstraint):
             continue
         if isinstance(arg, torch.Tensor):
+            if arg.device.type != "xpu":
+                raise ValueError(
+                    f"XPU backend: argument #{index} is on device "
+                    f"'{arg.device}', expected an XPU tensor")
             flat.append((arg.data_ptr(), tuple(arg.shape), arg.stride()))
         elif isinstance(param, ScalarConstraint):
             flat.append(_scalar_arg(arg, param).tobytes())
@@ -319,20 +310,18 @@ def launch(stream, grid, kernel, args):
     is loaded and run by the Level Zero runtime with the runtime arguments only
     (compile-time constants are baked into the binary).
     """
-    options = _current_options()
-    block = _launch_block(options)
-
-    with _xe_context():
-        compiled = compile_for_launch(kernel, args)
+    compiled = compile_for_launch(kernel, args)
     return launch_compiled(stream, grid, compiled, args)
 
 
 def launch_compiled(stream, grid, compiled, args):
-    """Launch a previously compiled binary without compilation/cache lookup."""
-    sig = compiled.signature
-    binary = compiled.binary
+    """Launch a previously compiled binary without compilation/cache lookup.
 
-    runtime_args = _runtime_kernel_args(sig, args)
+    Must run under the ``compile_options`` the binary was compiled with: the
+    launch block is baked into the binary.
+    """
+    runtime_args = _runtime_kernel_args(compiled.signature, args)
+    block = _launch_block(_current_options())
 
     # The Level Zero runtime enqueues onto its own immediate command list, which
     # is unordered with respect to ``stream``. Drain the caller's pending work
@@ -343,4 +332,5 @@ def launch_compiled(stream, grid, compiled, args):
         stream.synchronize()
 
     launch_level_zero_module_kernel(
-        binary, sig.symbol, runtime_args, _triplet(grid), _triplet(block))
+        compiled.binary, compiled.symbol, runtime_args, _triplet(grid),
+        _triplet(block))

@@ -2,10 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gc
+import importlib.util
+from pathlib import Path
 
 import pytest
 
-from samples.utils.cpu import benchmark
+
+def _load_benchmark():
+    path = (Path(__file__).resolve().parents[1]
+            / "samples" / "cpu" / "utils" / "benchmark.py")
+    spec = importlib.util.spec_from_file_location("cpu_sample_benchmark", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+benchmark = _load_benchmark()
 
 
 def _clock(values):
@@ -25,7 +37,7 @@ def test_calibration_targets_two_hundred_milliseconds(monkeypatch):
 
     warmup, iterations, rounds = benchmark._estimate_bench_iter(function, ())
 
-    assert (warmup, iterations, rounds) == (1, 200, 5)
+    assert (warmup, iterations, rounds) == (1, 200, benchmark._ROUNDS)
     assert calls == 6
 
 
@@ -53,18 +65,17 @@ def test_report_benchmark_returns_arithmetic_mean(monkeypatch):
         nonlocal calls
         calls += 1
 
-    round_times_ns = (100_000_000, 200_000_000, 300_000_000,
-                      400_000_000, 500_000_000)
+    rounds = benchmark._ROUNDS
     clock_values = [0, 5_000_000]
-    for elapsed_ns in round_times_ns:
-        clock_values.extend((0, elapsed_ns))
+    for _ in range(rounds):
+        clock_values.extend((0, 300_000_000))
     monkeypatch.setattr(
         benchmark.time, "perf_counter_ns", _clock(clock_values))
 
     result = benchmark.report_benchmark(function, ())
 
     assert result == {"mean_time_ms": 1.5}
-    assert calls == 1007
+    assert calls == 7 + 200 * rounds
 
 
 def test_measurement_restores_enabled_gc():

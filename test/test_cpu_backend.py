@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
-from types import ModuleType
 from types import SimpleNamespace
 
 import cuda.tile as ct
@@ -11,6 +9,7 @@ from cuda.tile._backend import cpu
 from cuda.tile._backend._signature import build_signature
 import numpy as np
 import pytest
+import torch
 
 ConstInt = ct.Constant[int]
 
@@ -74,6 +73,49 @@ def test_signature_rejects_negative_strides():
         build_signature(_vector_add, tuple(arguments))
 
 
+@ct.kernel
+def _scalar_and_array(x, flag: bool, scale: float, count: int):
+    pass
+
+
+def test_signature_matches_native_launcher_types():
+    x = np.zeros(4, dtype=np.bool_)
+
+    parameters = build_signature(_scalar_and_array, (x, True, 1.0, 1)).parameters
+
+    assert parameters[0].dtype is ct.bool_
+    assert [p.dtype for p in parameters[1:]] == [ct.bool_, ct.float32, ct.int32]
+
+
+def test_signature_detects_internally_aliasing_arrays():
+    base = np.zeros(16, dtype=np.float32)
+    broadcast = np.lib.stride_tricks.as_strided(base, shape=(4, 4), strides=(0, 4))
+
+    aliasing = build_signature(_scalar_and_array, (broadcast, True, 1.0, 1))
+    disjoint = build_signature(_scalar_and_array, (base.reshape(4, 4), True, 1.0, 1))
+
+    assert aliasing.parameters[0].may_alias_internally
+    assert not disjoint.parameters[0].may_alias_internally
+
+
+def test_signature_skips_layout_assumptions_beyond_five_dimensions():
+    x = np.zeros((16,) * 6, dtype=np.float32)
+
+    [array, *_] = build_signature(_scalar_and_array, (x, True, 1.0, 1)).parameters
+
+    assert array.stride_constant == (None,) * 6
+    assert array.shape_divisible_by == (1,) * 6
+
+
+def test_flatten_arguments_rejects_non_host_arrays():
+    arguments = _arguments()
+    signature = build_signature(_vector_add, arguments)
+    device_tensor = torch.empty(64, dtype=torch.float32, device="meta")
+
+    with pytest.raises(ValueError, match="expected host memory"):
+        cpu._flatten_arguments(signature, (device_tensor, *arguments[1:]))
+
+
 def test_lower_tileir_uses_cpu_pipeline(monkeypatch):
     observed = {}
     monkeypatch.setattr(cpu, "resolve_tool", lambda *args: "/tool")
@@ -91,25 +133,25 @@ def test_lower_tileir_uses_cpu_pipeline(monkeypatch):
     assert "append-grid-args=true" in observed["argv"][1]
     assert "drop-rounding-modes=true" in observed["argv"][1]
     assert "--convert-memref-args-to-ptr-args" in observed["argv"]
-    assert "--mlir-print-ir-after-all" not in observed["argv"]
+    assert not any(arg.startswith("--mlir-print-ir") for arg in observed["argv"])
 
 
 def test_triton_cpu_reports_missing_package(monkeypatch):
     monkeypatch.setattr(cpu.importlib.util, "find_spec", lambda name: None)
+    cpu._triton_cpu.cache_clear()
 
     with pytest.raises(ImportError, match="requires the 'cpu' extra"):
         cpu._triton_cpu()
 
 
 def test_triton_cpu_preserves_nested_import_error(monkeypatch):
+    def import_module(name):
+        raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+
     monkeypatch.setattr(
         cpu.importlib.util, "find_spec", lambda name: object())
-    for name in tuple(sys.modules):
-        if name == "triton" or name.startswith("triton."):
-            monkeypatch.delitem(sys.modules, name, raising=False)
-    triton = ModuleType("triton")
-    triton.__path__ = []
-    monkeypatch.setitem(sys.modules, "triton", triton)
+    monkeypatch.setattr(cpu.importlib, "import_module", import_module)
+    cpu._triton_cpu.cache_clear()
 
     with pytest.raises(ModuleNotFoundError, match=r"triton\._C"):
         cpu._triton_cpu()

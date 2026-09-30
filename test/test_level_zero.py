@@ -4,7 +4,8 @@
 
 import pytest
 
-from cuda.tile import _level_zero
+_level_zero = pytest.importorskip(
+    "cuda.tile._level_zero", reason="needs the Level Zero extension")
 
 
 def test_kernel_argument_expansion():

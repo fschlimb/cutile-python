@@ -7,6 +7,9 @@ import shutil
 import subprocess
 import sys
 
+from cuda.tile._cext import default_tile_context
+from cuda.tile._exception import TileCompilerTimeoutError
+
 
 @functools.lru_cache(maxsize=32)
 def _fingerprint_file(path: str, size: int, mtime_ns: int) -> str:
@@ -57,12 +60,20 @@ def resolve_tool(backend: str, env_var: str, name: str) -> str:
 
 
 def run_tool(backend: str, argv: list[str], input_bytes: bytes) -> bytes:
-    """Run a backend tool with byte input and report captured failures."""
+    """Run a backend tool with byte input and report captured failures.
 
+    The tool is bounded by the compiler timeout (see ``ct.compiler_timeout``).
+    """
+
+    timeout = default_tile_context.config.compiler_timeout_sec
     try:
         process = subprocess.run(
             argv, input=input_bytes, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False)
+            stderr=subprocess.PIPE, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise TileCompilerTimeoutError(
+            f"{backend} backend: {argv[0]} exceeded the compiler timeout of "
+            f"{timeout}s.", " ".join(argv[1:]), None) from None
     except OSError as error:
         raise RuntimeError(
             f"{backend} backend: failed to execute {argv[0]}: {error}") from error

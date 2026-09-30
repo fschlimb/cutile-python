@@ -23,6 +23,7 @@ from cuda.tile.compilation import ScalarConstraint
 
 from ._custom import compile_for_launch
 from ._custom import normalize_dims
+from ._signature import array_device_type
 from ._signature import array_metadata
 from ._toolchain import file_fingerprint
 from ._toolchain import resolve_tool
@@ -204,7 +205,6 @@ def _lower_tileir(bytecode: bytes) -> bytes:
         "--convert-memref-args-to-ptr-args",
         "--cse",
         "--canonicalize",
-        "--mlir-print-ir-before-all"
     ]
     output = run_tool("CPU", argv, bytecode)
     dump = os.environ.get("CUTILE_CPU_DUMP_MLIR")
@@ -242,7 +242,7 @@ def compile_tileir(tileir_bytecode, *, symbol, sm_arch, signature):
 _SCALAR_TYPES = {
     ct.int8: "i8", ct.int16: "i16", ct.int32: "i32", ct.int64: "i64",
     ct.uint8: "u8", ct.uint16: "u16", ct.uint32: "u32", ct.uint64: "u64",
-    ct.float32: "fp32", ct.float64: "fp64",
+    ct.float32: "fp32", ct.float64: "fp64", ct.bool_: "i1",
 }
 
 
@@ -284,12 +284,17 @@ def _argument_layout(signature):
 def _flatten_arguments(signature, arguments):
     values = []
     kinds, types = _argument_layout(signature)
-    for kind, argument in zip(kinds, arguments):
+    for index, (kind, argument) in enumerate(zip(kinds, arguments)):
         if kind is None:
             continue
         if kind == "scalar":
             values.append(argument)
             continue
+        device = array_device_type(argument)
+        if device != "cpu":
+            raise ValueError(
+                f"CPU backend: argument #{index} is on device '{device}', "
+                "expected host memory")
         pointer, shape, strides, _dtype = array_metadata(argument)
         values.extend([pointer, *shape, *strides])
     return values, types
