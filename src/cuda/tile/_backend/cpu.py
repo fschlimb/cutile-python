@@ -193,6 +193,8 @@ def _lower_tileir(bytecode: bytes, options: Options) -> bytes:
         "--cse",
         "--canonicalize",
     ]
+    if os.environ.get("MLIR_ENABLE_DUMP") == "1":
+        argv.append("--mlir-print-ir-before-all")
     output = run_tool("CPU", argv, bytecode)
     dump = os.environ.get("CUTILE_CPU_DUMP_MLIR")
     if dump:
@@ -261,7 +263,33 @@ def _argument_layout(signature):
     return tuple(kinds), {index: value for index, value in enumerate(types)}
 
 
-def _flatten_arguments(kinds, arguments):
+def _launcher_argument_layout(signature, flat_types):
+    """Group each array's ABI types for the native launcher's tuple parser."""
+    kinds, _ = _argument_layout(signature)
+    grouped_types = {}
+    flat_index = 0
+    for parameter, kind in zip(signature.parameters, kinds):
+        if kind is None:
+            continue
+        if kind == "scalar":
+            grouped_types[len(grouped_types)] = flat_types[flat_index]
+            flat_index += 1
+            continue
+
+        ndim = parameter.ndim
+        grouped_types[len(grouped_types)] = (
+            flat_types[flat_index],
+            tuple(flat_types[index] for index in range(flat_index + 1, flat_index + 1 + ndim)),
+            tuple(flat_types[index] for index in range(flat_index + 1 + ndim, flat_index + 1 + 2 * ndim)),
+        )
+        flat_index += 1 + 2 * ndim
+
+    if flat_index != len(flat_types):
+        raise ValueError("CPU launcher argument layout does not match signature")
+    return grouped_types
+
+
+def _flatten_arguments(kinds, arguments, argument_metadata=None):
     values = []
     for index, (kind, argument) in enumerate(zip(kinds, arguments)):
         if kind is None:
@@ -274,8 +302,40 @@ def _flatten_arguments(kinds, arguments):
             raise ValueError(
                 f"CPU backend: argument #{index} is on device '{device}', "
                 "expected host memory")
-        pointer, shape, strides, _dtype = array_metadata(argument)
+        metadata = (
+            array_metadata(argument)
+            if argument_metadata is None or argument_metadata[index] is None
+            else argument_metadata[index]
+        )
+        pointer, shape, strides, _dtype = metadata
         values.extend([pointer, *shape, *strides])
+    return values
+
+
+def _group_arguments(kinds, arguments, argument_metadata=None):
+    values = []
+    for index, (kind, argument) in enumerate(zip(kinds, arguments)):
+        if kind is None:
+            continue
+        if kind == "scalar":
+            values.append(argument)
+            continue
+
+        device = array_device_type(argument)
+        if device != "cpu":
+            raise ValueError(
+                f"CPU backend: argument #{index} is on device '{device}', "
+                "expected host memory")
+        metadata = (
+            array_metadata(argument)
+            if argument_metadata is None or argument_metadata[index] is None
+            else argument_metadata[index]
+        )
+        pointer, shape, strides, _dtype = metadata
+        pointer_argument = (
+            argument if callable(getattr(argument, "data_ptr", None)) else pointer
+        )
+        values.append((pointer_argument, shape, strides))
     return values
 
 
@@ -290,8 +350,10 @@ def load(binary: bytes, signature, options: Options) -> _Loaded:
     """Load the shared object and build a Triton launcher for its signature."""
     del options
     _ir, _target, _backend, CPULauncher, CPUUtils = _triton_cpu()
-    kinds, types = _argument_layout(signature)
-    launcher = CPULauncher(SimpleNamespace(signature=types, constants={}), None)
+    kinds, flat_types = _argument_layout(signature)
+    launcher_types = _launcher_argument_layout(signature, flat_types)
+    launcher = CPULauncher(
+        SimpleNamespace(signature=launcher_types, constants={}), None)
     module, function, *_unused = CPUUtils().load_binary(
         signature.symbol, binary, 0, 0)
     return _Loaded(kinds, module, function, launcher)
@@ -308,8 +370,13 @@ def synchronize(stream):
 
 def launch(loaded: _Loaded, stream, grid, args):
     """Run a loaded kernel; ``num_cpu_threads`` sets the worker count."""
+    return _launch_with_metadata(loaded, stream, grid, args, None)
+
+
+def _launch_with_metadata(loaded: _Loaded, stream, grid, args, argument_metadata):
+    """Launch using metadata already collected for cache-key construction."""
     synchronize(stream)
-    values = _flatten_arguments(loaded.kinds, args)
+    values = _group_arguments(loaded.kinds, args, argument_metadata)
     metadata = SimpleNamespace(
         num_cpu_threads=int(current_options().get("num_cpu_threads", 0)))
     x, y, z = normalize_dims(grid)

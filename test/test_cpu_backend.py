@@ -43,6 +43,24 @@ def test_signature_flattens_arrays_and_omits_constants():
     assert values[7:9] == [64, 1]
 
 
+def test_flatten_arguments_uses_prepared_array_metadata(monkeypatch):
+    arguments = _arguments()
+    kinds, _ = cpu._argument_layout(build_signature(_vector_add, arguments))
+    metadata = [
+        cpu.array_metadata(argument) if kind == "array" else None
+        for kind, argument in zip(kinds, arguments)
+    ]
+    monkeypatch.setattr(
+        cpu, "array_metadata",
+        lambda _argument: pytest.fail("array metadata was recomputed"),
+    )
+
+    values = cpu._flatten_arguments(kinds, arguments, metadata)
+
+    assert values[0] == arguments[0].ctypes.data
+    assert values[1:3] == [64, 1]
+
+
 def test_signature_uses_actual_array_alignment():
     arguments = list(_arguments())
     arguments[0] = arguments[0][1:]
@@ -106,6 +124,7 @@ def test_flatten_arguments_rejects_non_host_arrays():
 
 def test_lower_tileir_uses_cpu_pipeline(monkeypatch):
     observed = {}
+    monkeypatch.delenv("MLIR_ENABLE_DUMP", raising=False)
     monkeypatch.setattr(cpu, "resolve_tool", lambda *args: "/tool")
 
     def run_tool(backend, argv, bytecode):
@@ -123,6 +142,10 @@ def test_lower_tileir_uses_cpu_pipeline(monkeypatch):
     assert "assume-in-bounds=true" in observed["argv"][1]
     assert "--convert-memref-args-to-ptr-args" in observed["argv"]
     assert not any(arg.startswith("--mlir-print-ir") for arg in observed["argv"])
+
+    monkeypatch.setenv("MLIR_ENABLE_DUMP", "1")
+    cpu._lower_tileir(b"bytecode", cpu.Options(True))
+    assert "--mlir-print-ir-before-all" in observed["argv"]
 
 
 def test_triton_cpu_reports_missing_package(monkeypatch):
@@ -220,7 +243,11 @@ def test_load_builds_launcher_once(monkeypatch):
 
     assert [call[0] for call in calls].count("create") == 1
     assert [call[0] for call in calls].count("load") == 1
+    assert calls[0][1] == [("*i8", ("i32",), ("i32",))] * 3
     launches = [call for call in calls if call[0] == "launch"]
     assert len(launches) == 2
     assert launches[0][1][:5] == (4, 1, 1, 0, 1234)
+    assert launches[0][1][9:] == tuple(
+        (argument.ctypes.data, (64,), (1,)) for argument in arguments[:3]
+    )
     assert [args[5].num_cpu_threads for _, args in launches] == [0, 3]

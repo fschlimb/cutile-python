@@ -96,6 +96,42 @@ def test_launch_compiles_and_loads_once(frontend, backend):
     assert launches[0][1] == (b"binary", build_signature(_kernel, _args()).symbol, ())
 
 
+def test_launch_shares_fresh_argument_metadata_with_backend(
+    frontend, backend, monkeypatch
+):
+    first = np.zeros(16, dtype=np.float32)
+    second = np.ones(16, dtype=np.float32)
+    metadata_calls = []
+    launches = []
+    original_array_metadata = _custom.array_metadata
+
+    def count_array_metadata(value):
+        if isinstance(value, np.ndarray):
+            metadata_calls.append(value)
+        return original_array_metadata(value)
+
+    def launch_with_metadata(loaded, stream, grid, args, argument_metadata):
+        launches.append((args, argument_metadata))
+        backend.launch(loaded, stream, grid, args)
+
+    monkeypatch.setattr(_custom, "array_metadata", count_array_metadata)
+    monkeypatch.setattr(
+        backend, "_launch_with_metadata", launch_with_metadata, raising=False
+    )
+
+    ct.launch(None, (1,), _kernel, (first, 1.0, 4))
+    ct.launch(None, (1,), _kernel, (second, 2.0, 4))
+
+    assert len(metadata_calls) == 2
+    assert metadata_calls[0] is first
+    assert metadata_calls[1] is second
+    assert launches[0][0][0] is first
+    assert launches[1][0][0] is second
+    assert launches[0][1][0][0] == first.ctypes.data
+    assert launches[1][1][0][0] == second.ctypes.data
+    assert backend.calls.count("compile") == 1
+
+
 def test_runtime_scalar_values_do_not_rebuild_signatures(frontend, backend):
     built = []
 

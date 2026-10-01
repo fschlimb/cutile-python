@@ -35,6 +35,7 @@ _LAUNCH_CACHE_LIMIT = 256
 
 # Base address alignments above this many bytes (log2) share a cache entry.
 _MAX_TRACKED_ALIGNMENT_LOG2 = 12
+_UNPREPARED_METADATA = object()
 
 _NO_OPTIONS = MappingProxyType({})
 
@@ -155,26 +156,47 @@ def _kernel_cache(kernel) -> _KernelCache:
         return kernel.__dict__.setdefault("_cutile_backend_cache", _KernelCache())
 
 
-def _argument_key(value, constant: bool):
+def _argument_key(value, constant: bool, metadata=_UNPREPARED_METADATA):
     """Everything about ``value`` that a signature builder may depend on."""
     if constant:
         return type(value), value
-    try:
-        pointer, shape, strides, dtype = array_metadata(value)
-    except TypeError:
+    if metadata is _UNPREPARED_METADATA:
+        try:
+            metadata = array_metadata(value)
+        except TypeError:
+            metadata = None
+    if metadata is None:
         return type(value)
+    pointer, shape, strides, dtype = metadata
     alignment = ((pointer & -pointer).bit_length() - 1 if pointer
                  else _MAX_TRACKED_ALIGNMENT_LOG2)
     return dtype, shape, strides, min(alignment, _MAX_TRACKED_ALIGNMENT_LOG2)
 
 
-def compile_for_launch(kernel, args, *, signature_builder=build_signature):
-    """Return the active backend's :class:`CompiledKernel` for ``args``.
+def _prepare_argument_metadata(kernel, args):
+    constants = kernel._annotated_function.constant_parameter_mask
+    if len(args) != len(constants):
+        raise TypeError(
+            f"kernel expects {len(constants)} arguments, got {len(args)}")
 
-    ``signature_builder(kernel, args)`` may add assumptions to the signature,
-    as long as they only depend on constants, scalar types and array
-    dtypes, shapes, strides and alignment.
-    """
+    keys = []
+    metadata = []
+    for value, constant in zip(args, constants):
+        if constant:
+            array_info = None
+        else:
+            try:
+                array_info = array_metadata(value)
+            except TypeError:
+                array_info = None
+        keys.append(_argument_key(value, constant, array_info))
+        metadata.append(array_info)
+    return tuple(keys), tuple(metadata)
+
+
+def _compile_for_launch(
+    kernel, args, *, signature_builder, argument_keys=None
+):
     backend = _backend
     if backend is None:
         raise RuntimeError("no backend is active; see cuda.tile.set_backend()")
@@ -184,8 +206,9 @@ def compile_for_launch(kernel, args, *, signature_builder=build_signature):
         raise TypeError(
             f"kernel expects {len(constants)} arguments, got {len(args)}")
     options = _normalized_options(backend)
-    key = (backend, options, signature_builder,
-           tuple(map(_argument_key, args, constants)))
+    if argument_keys is None:
+        argument_keys = tuple(map(_argument_key, args, constants))
+    key = (backend, options, signature_builder, argument_keys)
     cache = _kernel_cache(kernel)
     compiled = cache.launches.get(key)
     if compiled is None:
@@ -203,6 +226,17 @@ def compile_for_launch(kernel, args, *, signature_builder=build_signature):
     except KeyError:  # evicted by another thread
         pass
     return compiled
+
+
+def compile_for_launch(kernel, args, *, signature_builder=build_signature):
+    """Return the active backend's :class:`CompiledKernel` for ``args``.
+
+    ``signature_builder(kernel, args)`` may add assumptions to the signature,
+    as long as they only depend on constants, scalar types and array
+    dtypes, shapes, strides and alignment.
+    """
+    return _compile_for_launch(
+        kernel, args, signature_builder=signature_builder)
 
 
 def _compile(kernel, cache, backend, signature, options):
@@ -266,7 +300,21 @@ def launch(stream, grid, kernel, kernel_args, /):
     """
     if _backend is None:
         return _cext_launch(stream, grid, kernel, kernel_args)
-    compiled = compile_for_launch(kernel, kernel_args)
+    if getattr(_backend, "_launch_with_metadata", None) is None:
+        compiled = compile_for_launch(kernel, kernel_args)
+        compiled.backend.launch(compiled.loaded, stream, grid, kernel_args)
+        return
+
+    args = tuple(kernel_args)
+    argument_keys, argument_metadata = _prepare_argument_metadata(kernel, args)
+    compiled = _compile_for_launch(
+        kernel, args, signature_builder=build_signature,
+        argument_keys=argument_keys)
+    launch_with_metadata = getattr(
+        compiled.backend, "_launch_with_metadata", None)
+    if launch_with_metadata is not None:
+        return launch_with_metadata(
+            compiled.loaded, stream, grid, kernel_args, argument_metadata)
     compiled.backend.launch(compiled.loaded, stream, grid, kernel_args)
 
 
