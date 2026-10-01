@@ -143,7 +143,7 @@ Running on XPU
 
    Optional environment variables: `CUTILE_XPU_ARCH` selects the target architecture,
    `CUTILE_XPU_DUMP_MLIR` dumps the generated MLIR, and
-   `CUTILE_XPU_TILEIR_TO_MLIR` overrides the compiler tool path.
+   `TILEIR_TO_MLIR` overrides the compiler tool path.
 
 How to adapt an existing cuTile program
 ---------------------------------------

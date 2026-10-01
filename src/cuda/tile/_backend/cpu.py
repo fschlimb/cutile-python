@@ -132,7 +132,7 @@ def _compiler_identity(environment, options: Options):
         llvm_pass_plugin = os.environ.get("LLVM_PASS_PLUGIN_PATH")
 
         tool = resolve_tool(
-            "CPU", "CUTILE_CPU_TILEIR_TO_MLIR", "tileir-to-mlir")
+            "CPU", "TILEIR_TO_MLIR", "tileir-to-mlir")
         identity = {
             "schema": 2,
             "triton_version": triton_version,
@@ -182,7 +182,7 @@ def compiler_identity(options: Options):
 
 
 def _lower_tileir(bytecode: bytes, options: Options) -> bytes:
-    tool = resolve_tool("CPU", "CUTILE_CPU_TILEIR_TO_MLIR", "tileir-to-mlir")
+    tool = resolve_tool("CPU", "TILEIR_TO_MLIR", "tileir-to-mlir")
     assume_in_bounds = str(options.assume_in_bounds).lower()
     argv = [
         tool,

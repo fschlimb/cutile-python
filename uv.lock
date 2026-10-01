@@ -96,7 +96,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'xpu'" },
     { name = "torch", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'xpu'", specifier = "==2.13.0+xpu", index = "https://download.pytorch.org/whl/xpu", conflict = { package = "cuda-tile", extra = "xpu" } },
     { name = "torch", marker = "extra == 'cpu'", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "cuda-tile", extra = "cpu" } },
-    { name = "triton", marker = "extra == 'cpu'", git = "https://github.com/intel-sandbox/users.fschlimb.triton-cpu?rev=edad833879fd84b7f4bb9cf67b195725bcbd130b" },
+    { name = "triton", marker = "extra == 'cpu'", git = "https://github.com/intel-sandbox/users.fschlimb.triton-cpu?rev=77204ac33e0a02866acf28516081079132d509cd" },
     { name = "triton-xpu", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'xpu'", specifier = "==3.7.2", index = "https://download.pytorch.org/whl/xpu" },
     { name = "typing-extensions" },
 ]
@@ -1033,8 +1033,8 @@ wheels = [
 
 [[package]]
 name = "triton"
-version = "3.7.0+gitedad8338"
-source = { git = "https://github.com/intel-sandbox/users.fschlimb.triton-cpu?rev=edad833879fd84b7f4bb9cf67b195725bcbd130b#edad833879fd84b7f4bb9cf67b195725bcbd130b" }
+version = "3.8.0+cpu.git77204ac3"
+source = { git = "https://github.com/intel-sandbox/users.fschlimb.triton-cpu?rev=77204ac33e0a02866acf28516081079132d509cd#77204ac33e0a02866acf28516081079132d509cd" }
 
 [[package]]
 name = "triton-xpu"

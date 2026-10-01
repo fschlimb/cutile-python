@@ -191,7 +191,7 @@ def compiler_identity(options: Options):
     ocloc = shutil.which("ocloc")
     try:
         tool = resolve_tool(
-            "XPU", "CUTILE_XPU_TILEIR_TO_MLIR", "tileir-to-mlir")
+            "XPU", "TILEIR_TO_MLIR", "tileir-to-mlir")
     except FileNotFoundError:
         return None
     if ocloc is None:
@@ -236,11 +236,11 @@ def compile(bytecode: bytes, signature, options: Options) -> bytes:
     """Compile TileIR bytecode into an Xe device binary blob.
 
     Runs the native tileir-to-mlir tool (overridable with
-    ``CUTILE_XPU_TILEIR_TO_MLIR``) followed by the XeVM pipeline in
+    ``TILEIR_TO_MLIR``) followed by the XeVM pipeline in
     :func:`~cuda.tile._backend.xeas.xeas`.
     """
     del signature
-    tool = resolve_tool("XPU", "CUTILE_XPU_TILEIR_TO_MLIR", "tileir-to-mlir")
+    tool = resolve_tool("XPU", "TILEIR_TO_MLIR", "tileir-to-mlir")
     mlir = _run_tileir_to_mlir(tool, bytecode, options)
     with ir.Context():
         return xeas(mlir, xegpu_op_level=options.xegpu_op_level,
