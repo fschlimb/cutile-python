@@ -159,12 +159,14 @@ def test_compile_passes_options_to_the_native_compiler(monkeypatch):
     monkeypatch.setattr(xpu, "invoke", invoke)
     options = xpu.normalize_options(
         {"block_threads": 256, "assume_in_bounds": True})
+    signature = build_signature(_counter, (7, 4))
 
-    assert xpu.compile(b"bytecode", None, options) == b"binary"
+    assert xpu.compile(b"bytecode", signature, options) == b"binary"
     assert observed["backend"] == "xpu"
     assert observed["method"] == "compile_xpu"
     assert observed["bytecode"] == b"bytecode"
     assert observed["options"][:5] == ((256, 1, 1), True, "workgroup", True, "bmg")
+    assert observed["options"][-1] == (-1,)
 
 
 def test_launch_uses_the_compiled_block_and_symbol(monkeypatch):
@@ -204,6 +206,16 @@ def test_runtime_arguments_pass_arrays_as_memrefs():
 
     assert array == (x.data_ptr(), (4, 3), (6, 2))
     assert count == struct.pack("i", 3)
+
+
+def test_runtime_arguments_reject_devices_other_than_xpu0():
+    x = torch.empty(16)
+    signature = build_signature(_scaled, (x, 3, 16))
+
+    with pytest.raises(ValueError, match="xpu:1, but kernels run on xpu:0"):
+        xpu._runtime_arguments(
+            xpu.runtime_parameters("XPU", signature),
+            (_custom.array_metadata(x)._replace(device="xpu", device_index=1), 3))
 
 
 def test_runtime_arguments_reject_host_tensors():

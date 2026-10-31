@@ -14,7 +14,7 @@ from types import MappingProxyType
 from typing import Any
 
 from cuda.tile import _backend
-from cuda.tile._backend._signature import array_metadata, constant_parameters
+from cuda.tile._backend._signature import array_metadata, constant_key, constant_parameters
 from cuda.tile.tune._tune import _benchmark_launch, exhaustive_search
 
 
@@ -80,7 +80,7 @@ def _array_key(value):
         array = array_metadata(value)
     except TypeError:
         return None
-    return array.device, array.dtype, array.shape, array.strides
+    return array.device, array.device_index, array.dtype, array.shape, array.strides
 
 
 def _config_key(named_values, extra_names):
@@ -98,8 +98,23 @@ def _config_key(named_values, extra_names):
         if array is not None:
             key.append((name, array))
         elif name in extra_names:
-            key.append((name, type(value), value))
+            key.append((name, constant_key(value)))
     return tuple(key)
+
+
+def _option_key(value):
+    if isinstance(value, Mapping):
+        return tuple(sorted((name, _option_key(item)) for name, item in value.items()))
+    if isinstance(value, (tuple, list)):
+        return tuple(map(_option_key, value))
+    return constant_key(value)
+
+
+def _environment_key(backend, options):
+    if backend is None:
+        return None
+    # Launch-only options affect tuning even when they do not affect compilation.
+    return backend, backend.normalize_options(options), _option_key(options)
 
 
 def _make_injector(positions, values):
@@ -273,7 +288,16 @@ class AutotunedKernel(_Autotuned):
         if len(self._configs) == 1:
             self._local.best = 0
             return 0
-        key = _config_key(zip(self._arg_names, args), self._extra_names)
+        backend = _backend.backend_for(self._kernel, self._injectors[0](args))
+        if callable(self._options):
+            environment = tuple(
+                _environment_key(backend, self._plan_for(index, args)[1])
+                for index in range(len(self._configs)))
+        else:
+            options = (_backend.current_options() if self._options is None
+                       else self._options)
+            environment = _environment_key(backend, options)
+        key = environment, _config_key(zip(self._arg_names, args), self._extra_names)
         index, _ = self._select(key, lambda: self._tune(stream, args))
         return index
 
@@ -290,7 +314,7 @@ class AutotunedKernel(_Autotuned):
         full_args = self._injectors[index](args)
         kernel = self._kernels[index]
         context_factory = self._options_context_factory(options)
-        if _backend.get_backend() is None:
+        if _backend.backend_for(kernel, full_args) is None:
             launch_fn, target = _backend.launch, kernel
         elif context_factory is None:
             launch_fn = _backend.launch_compiled
@@ -393,8 +417,9 @@ class AutotunedFunction(_Autotuned):
     def _resolve(self, args, kwargs):
         """Return the config index and the operation built while tuning, if any."""
 
-        key = _config_key(self._bind(args, kwargs).arguments.items(),
-                          self._extra_names)
+        key = (_environment_key(_backend.get_backend(), _backend.current_options()),
+               _config_key(self._bind(args, kwargs).arguments.items(),
+                           self._extra_names))
         return self._select(key, lambda: self._tune(args, kwargs))
 
     def prepare(self, *args, **kwargs) -> Config:

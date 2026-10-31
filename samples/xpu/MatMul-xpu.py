@@ -12,86 +12,10 @@ from math import ceil
 
 # Kernels and helpers shared with the CUDA sample in the parent directory.
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from MatMul import swizzle_2d, persistent_matmul_kernel  # noqa: E402
+from MatMul import matmul_kernel, persistent_matmul_kernel  # noqa: E402
 
 # Use the in-tree experimental XPU backend hooks by shorthand module name.
 ct.set_backend("xpu")
-
-# import xpu  # Required for host-side grid calculation
-
-
-ConstInt = ct.Constant[int]
-
-
-@ct.kernel  # (num_ctas=ct.ByTarget(sm_100=2))
-def matmul_kernel(A, B, C,
-                  tm: ConstInt,         # Tile size along M dimension (rows of C)
-                  tn: ConstInt,         # Tile size along N dimension (columns of C)
-                  tk: ConstInt):        # Tile size along K dimension (inner product dimension)
-    """
-    cuTile kernel for performing matrix multiplication C = A @ B.
-
-    This kernel uses a tiled approach, where each block
-    computes a `tm` x `tn` tile of the output matrix C. The computation
-    involves iterating over the K-dimension in chunks of `tk`.
-
-    Args:
-        A: Input matrix A (M x K).
-        B: Input matrix B (K x N).
-        C: Output matrix C (M x N).
-        tm (ConstInt): The height of the output tile computed by this block.
-                       Corresponds to rows of A and C.
-        tn (ConstInt): The width of the output tile computed by this block.
-                       Corresponds to columns of B and C.
-        tk (ConstInt): The depth of the inner loop (K-dimension) tile size.
-                       Corresponds to columns of A and rows of B.
-    """
-    GROUP_SIZE_M = 8
-    M = A.shape[0]
-    N = B.shape[1]
-    bidx, bidy = swizzle_2d(M, N, tm, tn, GROUP_SIZE_M)
-
-    # Calculate the total number of tiles along the K-dimension that need to be processed.
-    # `ct.num_tiles(A, axis=1, shape=(tm, tk))` means:
-    #   "View A as an MxK tensor tiled by (tm, tk), and return the number of tiles along
-    #    axis 1 (the K dimension)."
-    # We pass shape=(tm, tk) to describe the 2D tiling, only `tk` matters for axis=1.
-    num_tiles_k = ct.num_tiles(A, axis=1, shape=(tm, tk))
-
-    # Initialize an accumulator for the current output tile (tm x tn).
-    # It's common practice to use `float32` for accumulation even with `float16` inputs
-    # to maintain higher precision during the sum-reduction of the matrix multiplication.
-    accumulator = ct.full((tm, tn), 0, dtype=ct.float32)
-    zero_pad = ct.PaddingMode.ZERO
-
-    # Convert fp32 to tf32 to use tensorcore
-    dtype = ct.tfloat32 if A.dtype == ct.float32 else A.dtype
-
-    # K-dimension loop: Iterate over the K-dimension in chunks of 'tk'.
-    # In each iteration, a `tm` x `tk` tile from A and a `tk` x `tn` tile from B
-    # are loaded, multiplied, and accumulated.
-    for k in range(num_tiles_k):
-        # Load tile from matrix A.
-        # The `index=(bidx, k_tile_idx)` specifies which (M-tile, K-tile) to load
-        # from global memory A. `shape=(tm, tk)` defines the size of this tile.
-        a = ct.load(A, index=(bidx, k), shape=(tm, tk), padding_mode=zero_pad).astype(dtype)
-
-        # Load tile from matrix B.
-        # The `index=(k_tile_idx, bidy)` specifies which (K-tile, N-tile) to load
-        # from global memory B. `shape=(tk, tn)` defines the size of this tile.
-        b = ct.load(B, index=(k, bidy), shape=(tk, tn), padding_mode=zero_pad).astype(dtype)
-
-        # Perform Matrix Multiplication for the current tiles.
-        # `ct.mma` computes the product of the two loaded tiles and accumulates the result.
-        accumulator = ct.mma(a, b, accumulator)
-
-    # Convert the final accumulated result to the desired output data type (C.dtype).
-    # This might downcast from float32 to float16 if the output is float16.
-    accumulator = ct.astype(accumulator, C.dtype)
-
-    # Store the computed tile to the global memory of the output matrix C.
-    # The `(bidx, bidy)` directly corresponds to the tile's position in the 2D output matrix.
-    ct.store(C, index=(bidx, bidy), tile=accumulator)
 
 
 def cutile_matmul(A: torch.Tensor, B: torch.Tensor, options: dict,
@@ -104,8 +28,8 @@ def cutile_matmul(A: torch.Tensor, B: torch.Tensor, options: dict,
     and launches the `matmul_kernel`.
 
     Args:
-        A (torch.Tensor): The first input matrix (M x K). Must be on a CUDA device.
-        B (torch.Tensor): The second input matrix (K x N). Must be on a CUDA device
+        A (torch.Tensor): The first input matrix (M x K). Must be on an XPU device.
+        B (torch.Tensor): The second input matrix (K x N). Must be on an XPU device
                           and have its K dimension match A's K dimension.
         persistent (bool): Whether to use the persistent kernel.
 
@@ -126,15 +50,7 @@ def cutile_matmul(A: torch.Tensor, B: torch.Tensor, options: dict,
         raise ValueError("Input tensors must be on a XPU device.")
     # Note: cuTile handles dtype compatibility within the kernel, but inputs should generally match.
 
-    # --- Determine Tile Shapes based on Data Type for Optimization ---
-    # This logic selects optimal tile sizes (tm, tn, tk) based on whether
-    # the input is half-precision (e.g., float16, bfloat16, where itemsize=2 bytes)
-    # which can often leverage Tensor Cores for higher throughput,
-    # or full-precision (e.g., float32, where itemsize=4 bytes).
-    # if A.dtype.itemsize == 2:  # Likely torch.float16 or torch.bfloat16
-    #     tm, tn, tk = 128, 256, 64  # Larger tiles for Tensor Core friendly types
-    # else:  # Likely torch.float32 or other
-    #     tm, tn, tk = 32, 32, 32   # Smaller, more general tiles
+    # --- Tile Shapes of the XPU schedule ---
     tm = 256
     tn = 256
     tk = 32
@@ -145,7 +61,7 @@ def cutile_matmul(A: torch.Tensor, B: torch.Tensor, options: dict,
     # Note: k_a and k_b must be equal due to validation. This is the 'K' dimension.
 
     # --- Calculate Grid Dimensions for Kernel Launch (1D Grid) ---
-    # The grid defines how many CUDA blocks (CTAs) will be launched.
+    # The grid defines how many blocks will be launched.
     # Each block computes one (tm x tn) output tile of matrix C.
     # `ceil(total_dim / tile_dim)` ensures enough blocks are launched to cover
     # the entire matrix, even if dimensions are not perfect multiples of tile sizes.
@@ -153,11 +69,9 @@ def cutile_matmul(A: torch.Tensor, B: torch.Tensor, options: dict,
     grid_y = ceil(n / tn)  # Number of blocks needed along the N dimension (columns of C)
     grid_size = grid_x * grid_y
     if persistent:
-        NUM_SMS = 32
-        # NUM_SMS = torch.cuda.get_device_properties(
-        #     "cuda"
-        # ).multi_processor_count
-        grid_size = min(NUM_SMS, grid_size)
+        # One persistent block per Xe core.
+        num_xe_cores = torch.xpu.get_device_properties(A.device).gpu_subslice_count
+        grid_size = min(num_xe_cores, grid_size)
     grid = (grid_size, 1, 1)
 
     # --- Create Output Tensor C ---
@@ -219,29 +133,7 @@ if __name__ == "__main__":
     else:
         print("Correctness check disabled")
 
-    # # --- Test Case 2: float32 (Single-Precision) ---
-    # torch.set_float32_matmul_precision("high")
-    # print("\n--- Test Case 2: Matrix Multiplication with float32 (Single-Precision) ---")
-    # # Create random input matrices with float32 data type on the XPU device.
-    # A_fp32 = torch.randn(M_dim, K_dim, dtype=torch.float32, device=device)
-    # B_fp32 = torch.randn(K_dim, N_dim, dtype=torch.float32, device=device)
-    # print(f"Input A shape: {A_fp32.shape}, dtype: {A_fp32.dtype}")
-    # print(f"Input B shape: {B_fp32.shape}, dtype: {B_fp32.dtype}")
-
-    # # if torch.cuda.get_device_capability()[0] <= 8:
-    # #     # Ampere tfloat32 numerics is loose
-    # #     atol, rtol = 1e-2, 1e-2
-    # # else:
-    # #  atol, rtol = 2e-4, 1e-3
-
-    # # Perform matrix multiplication using the cuTile wrapper function.
-    # C_fp32_cutile = cutile_matmul(A_fp32, B_fp32, options)
-    # print(f"cuTile Output C shape: {C_fp32_cutile.shape}, dtype: {C_fp32_cutile.dtype}")
-    # if args.correctness_check:
-    #     torch.testing.assert_close(C_fp32_cutile, A_fp32 @ B_fp32, atol=atol, rtol=rtol)
-    #     print("Correctness check passed")
-    # else:
-    #     print("Correctness check disabled")
+    # Test Case 2 (float32) of the CUDA sample is not ported to XPU yet.
 
     # --- Test Case 3: Dimensions Not Multiples of Tile Sizes ---
     print("""\n--- Test Case 3: Matrix Multiplication with Dimensions
@@ -282,6 +174,5 @@ if __name__ == "__main__":
         print("Correctness check passed")
     else:
         print("Correctness check disabled")
-    torch.set_float32_matmul_precision("highest")
 
     print("\n--- All cuTile matrix multiplication examples completed. ---")

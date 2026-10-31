@@ -10,25 +10,14 @@ that bytecode into a binary for its target and launches it. Select one with
 the enclosing :func:`cuda.tile.backend_options` block. Signature derivation,
 in-memory and on-disk caching are shared by all backends.
 
-A backend is a module (or any object) providing:
-
-* ``sm_arch``, ``bytecode_version``: compile target and TileIR version.
-* ``normalize_options(options) -> Hashable``: validate the options of a
-  :func:`backend_options` block, rejecting unknown keys, into a hashable value
-  with a stable ``repr`` covering everything that affects ``compile``.
-* ``compiler_identity(options) -> str | None``: identify everything besides
-  the bytecode that affects ``compile``; ``None`` disables the disk cache.
-* ``compile(bytecode, signature, options) -> bytes``.
-* ``load(binary, signature, options)``: prepare a binary for launching; called
-  once per binary.
-* ``launch(loaded, stream, grid, args)``: run ``load``'s result synchronously.
-  ``args`` holds the kernel arguments without compile-time constants, with
-  each array described by an :class:`ArrayArgument`.
-* ``synchronize(stream)``: wait for work queued on ``stream``.
+A backend is a module or object implementing the :class:`Backend` protocol.
+Launches with an array argument on a CUDA device always run on CUDA.
 """
 
 from ._custom import (
+    Backend,
     CompiledKernel,
+    backend_for,
     backend_options,
     benchmark,
     benchmark_callable,
@@ -44,7 +33,9 @@ from ._signature import ArrayArgument
 
 __all__ = (
     "ArrayArgument",
+    "Backend",
     "CompiledKernel",
+    "backend_for",
     "backend_options",
     "benchmark",
     "benchmark_callable",

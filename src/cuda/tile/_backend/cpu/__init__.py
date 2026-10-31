@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import hashlib
 import json
 import operator
 import os
@@ -18,14 +17,16 @@ from typing import Any, Mapping, NamedTuple
 import cuda.tile as ct
 from cuda.tile.compilation import ArrayConstraint
 
-from .._custom import bool_option, check_options, current_options, normalize_dims
-from .._custom import synchronize_stream as synchronize
-from .._signature import ArrayArgument, check_argument, runtime_parameters, scalar_format
+from .._custom import current_options
+from .._native import BYTECODE_VERSION
 from .._native import compiler as native_compiler
-from .._native import file_fingerprint, invoke
+from .._native import file_fingerprint, identity_digest, invoke
+from .._signature import ArrayArgument, check_argument, runtime_parameters, scalar_format
+from .._util import bool_option, check_options, normalize_dims
+from .._util import synchronize_stream as synchronize
 
-sm_arch = "3000"
-bytecode_version = "13.3"
+name = "cpu"
+bytecode_version = BYTECODE_VERSION
 
 _TRANSFORM_SCHEDULE = os.path.join(os.path.dirname(__file__), "cpu_schedule.mlir")
 
@@ -70,9 +71,6 @@ def _lowering_pipeline(entry_point: str | None = None) -> str:
 # Options of a ``backend_options`` block; ``num_cpu_threads`` only applies at launch.
 _OPTIONS = ("assume_in_bounds", "num_cpu_threads")
 
-# CPU flags (as Linux reports them) required by the AMX lowering.
-_AMX_FLAGS = frozenset({"amx_tile", "amx_bf16", "amx_int8"})
-
 
 @dataclasses.dataclass(frozen=True)
 class Options:
@@ -100,13 +98,18 @@ def _host_cpu():
                                "CPU implementer", "CPU part", "CPU variant", "CPU revision")}
 
 
+def _amx_enabled() -> bool:
+    """Whether the launcher enabled AMX tile, BF16 and INT8 for this process."""
+    from ._cpu import amx_enabled
+
+    return amx_enabled
+
+
 def _transform_entry_point() -> str:
     """The ``cpu_schedule.mlir`` entry point whose code the host can execute."""
     if platform.machine() != "x86_64":
         return "__transform_nano"
-    if _AMX_FLAGS <= set(_host_cpu().get("flags", "").split()):
-        return "__transform_nano_amx"
-    return "__transform_nano_x86"
+    return "__transform_nano_amx" if _amx_enabled() else "__transform_nano_x86"
 
 
 def compiler_identity(options: Options):
@@ -114,10 +117,11 @@ def compiler_identity(options: Options):
 
     try:
         identity = {
-            "schema": 5,
+            "schema": 6,
             "compiler": file_fingerprint(native_compiler("cpu").__file__),
             "cutile_cpu_backend": file_fingerprint(__file__),
             "cutile_cpu_schedule": file_fingerprint(_TRANSFORM_SCHEDULE),
+            "entry_point": _transform_entry_point(),
             "cpu": _host_cpu(),
             "platform": (platform.system(), platform.machine()),
             "libc": platform.libc_ver(),
@@ -125,9 +129,7 @@ def compiler_identity(options: Options):
         }
     except OSError:
         return None
-    return hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return identity_digest(identity)
 
 
 def compile(bytecode: bytes, signature, options: Options) -> bytes:

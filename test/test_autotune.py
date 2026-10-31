@@ -68,7 +68,12 @@ def _fake_runtime(monkeypatch, events=None):
 
     monkeypatch.setattr(autotune_mod, "exhaustive_search", search)
     backend = autotune_mod._backend
-    monkeypatch.setattr(backend, "get_backend", lambda: object())
+    class Backend:
+        def normalize_options(self, options):
+            return ()
+
+    target = Backend()
+    monkeypatch.setattr(backend, "backend_for", lambda kernel, args: target)
     monkeypatch.setattr(backend, "compile_for_launch", compile_kernel)
     monkeypatch.setattr(backend, "launch_compiled", launch_compiled)
     monkeypatch.setattr(backend, "backend_options", backend_options)
@@ -230,6 +235,11 @@ def test_autotune_forwards_generic_compiler_hints(monkeypatch):
 def test_autotune_rejects_options_for_factory():
     with pytest.raises(TypeError, match="options is only valid"):
         autotune(configs=[Config({})], options={})(lambda: lambda: None)
+
+
+def test_autotune_key_preserves_float_constant_bits():
+    assert autotune_mod._config_key([("value", 0.0)], {"value"}) != (
+        autotune_mod._config_key([("value", -0.0)], {"value"}))
 
 
 def test_autotune_factory_reuses_prepared_multi_kernel_operation(monkeypatch):

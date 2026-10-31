@@ -2,5 +2,5 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 [submodule "tileir-to-mlir"]
-	path = tileir-to-mlir
+	path = backends/tileir-to-mlir
 	url = https://github.com/libxsmm/tileir-to-mlir.git

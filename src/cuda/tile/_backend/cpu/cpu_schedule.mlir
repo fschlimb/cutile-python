@@ -1,4 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+//
 // SPDX-License-Identifier: Apache-2.0
 
 // Entry points by host capability; the CPU backend selects the one it can run.

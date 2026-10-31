@@ -4,17 +4,31 @@
 Non-CUDA Backends
 =================
 
-`cuda.tile.set_backend("cpu")` or `set_backend("xpu")` routes `cuda.tile.launch` to an
-experimental backend; `clear_backend()` restores CUDA. Backend options are scoped with
-`cuda.tile.backend_options({...})`; each backend rejects keys it does not know.
-The backend protocol is described in [`__init__.py`](__init__.py).
+`cuda.tile.set_backend("cpu")` or `set_backend("xpu")` selects an experimental
+backend for `cuda.tile.launch`; `clear_backend()` restores CUDA. The selection is
+process-wide, but launches with an array argument on a CUDA device, including
+arrays inside tuples, lists or dataclasses, still run on CUDA, with CUDA launch
+options such as `programmatic_dependent_launch`. Backend
+options are scoped per thread with `cuda.tile.backend_options({...})`; each backend
+rejects keys it does not know. Other backends implement the `Backend` protocol of
+[`cuda.tile._backend`](../src/cuda/tile/_backend/_custom.py).
+
+Backends compile cuTile's architecture-independent TileIR bytecode. Kernel hints
+for CUDA, such as `num_ctas` and `occupancy`, are ignored, so the CPU and XPU
+samples reuse the kernels of the CUDA samples where possible.
+
+Floating-point rounding modes are not silently discarded. The native backends
+accept nearest-even, full-precision and approximate operations, and the
+toward-zero integer conversion. Directed floating-point rounding and
+ties-away rounding are currently unsupported and raise `ValueError` before
+lowering. Integer floor and ceiling division retain their rounding semantics.
 
 XPU Backend (uv)
 ----------------
 
 The experimental XPU backend targets Intel GPUs and requires
 [tileir-to-mlir](https://github.com/libxsmm/tileir-to-mlir),
-included in this repository as the `tileir-to-mlir` submodule. The required
+included in this repository as the `backends/tileir-to-mlir` submodule. The required
 LLVM/MLIR and TileIRToMLIR toolchain is built automatically.
 
 Prerequisites
@@ -27,11 +41,11 @@ extension does not build with Clang on Linux. The XPU dependencies currently
 require Python 3.12 on Linux x86-64. No CUDA Toolkit, CUDA driver, or NVIDIA
 GPU is required, and an XPU device is required only to run kernels. Install `uv` using the
 [installation guide](https://docs.astral.sh/uv/getting-started/installation/),
-then initialize the environment from the repository root. `uv sync` installs
-the required CMake, Ninja, and Python build packages into `.venv`, including
-the CUDA headers from the `cuda-toolkit` wheels needed to build cuTile's `_cext`
-extension, which every variant builds. Set `CUDAToolkit_ROOT` to use the headers
-of a local CUDA Toolkit instead.
+then initialize the environment from the repository root. The `cpu` and `xpu`
+dependency groups install the required CMake, Ninja, and Python build packages into
+`.venv`, including the CUDA headers from the `cuda-toolkit` wheels needed to build
+cuTile's `_cext` extension, which every variant builds. Set `CUDAToolkit_ROOT` to use
+the headers of a local CUDA Toolkit instead.
 
 ```bash
 git submodule update --init --recursive
@@ -50,29 +64,30 @@ Backend builds
 --------------
 
 CUDA, XPU, and CPU installations are mutually exclusive. Run `uv sync` from
-the repository root, selecting the matching extra and build variant:
+the repository root, selecting the matching dependency group and build variant.
+Building without isolation keeps the persistent CMake build trees valid:
 
 ```bash
-CUTILE_BUILD_VARIANT=xpu uv sync --extra xpu
+CUTILE_BUILD_VARIANT=xpu uv sync --group xpu --no-build-isolation-package cuda-tile
 ```
 
-No additional build-isolation options are needed. The first build checks out and
+A plain `uv sync` builds the CUDA variant as before. The first build checks out and
 builds the LLVM revision required by TileIRToMLIR. Later builds reuse the
 checkout and build outputs, recompiling only changed sources and dependencies.
 LLVM is reconfigured only when the requested settings or its actual CMake cache
 change; sequential CPU/XPU builds can still share the LLVM build directory.
 
 `CUTILE_BUILD_VARIANT` defaults to `cuda`, which builds exactly as described in
-[Building from Source](../../../../README.md#building-from-source). All `cpu` and `xpu`
-backend code lives in this directory: the Python backends, their native launchers,
-the native compiler, and the CMake build, with tests in
-[test/backend](../../../../test/backend) and samples in
-[samples/cpu](../../../../samples/cpu) and [samples/xpu](../../../../samples/xpu).
-The samples import the kernels they share with the CUDA samples in
-[samples](../../../../samples). These variants stage `_cext` like CUDA builds and
-copy their backend extensions and runtime files into `cuda/tile/_backend` with
-`cmake --install`. After changing their C++ code, rerun `uv sync`, or rebuild
-and restage manually:
+[Building from Source](../README.md#building-from-source). The `cpu` and `xpu`
+variants are kept apart from the CUDA code: this directory holds their native
+launchers, the native compiler, the CMake build, the TileIRToMLIR submodule and
+the tests ([test](test)); the Python backends live in
+[src/cuda/tile/_backend](../src/cuda/tile/_backend) and the samples in
+[samples/cpu](../samples/cpu) and [samples/xpu](../samples/xpu). The samples import
+the kernels they share with the CUDA samples in [samples](../samples). These variants
+stage `_cext` like CUDA builds and copy their backend extensions and runtime files
+into `cuda/tile/_backend` with `cmake --install`. After changing their C++ code,
+rerun `uv sync`, or rebuild and restage manually:
 
 ```bash
 cmake --build build && cmake --install build --prefix src --component cuTileBackend
@@ -82,6 +97,11 @@ CPU/XPU compilation uses a private nanobind extension linked against the pinned
 LLVM/MLIR and TileIRToMLIR libraries. Installed kernels do not invoke LLVM tools
 or require MLIR Python bindings. The original CUDA compiler and build path are
 unchanged. These native backend builds currently support Linux.
+
+XPU array parameters use a uniform ranked-memref ABI, including unused arrays
+and arrays used only for their shape or strides. Compilation rejects array
+access patterns that cannot be represented by this ABI. Descriptor offsets,
+sizes and strides are 64-bit values.
 
 Compilation runs in-process by default, releasing the GIL and using a fresh
 MLIR context per call. XPU device-code generation is serialized because
@@ -96,7 +116,8 @@ type in the timeout worker, without an additional worker traceback.
 Override the required LLVM revision when needed:
 
 ```bash
-USE_LLVM_REVISION=commit-or-tag CUTILE_BUILD_VARIANT=xpu uv sync --extra xpu
+USE_LLVM_REVISION=commit-or-tag CUTILE_BUILD_VARIANT=xpu \
+   uv sync --group xpu --no-build-isolation-package cuda-tile
 ```
 
 Revision locations
@@ -104,9 +125,9 @@ Revision locations
 
 The related revisions have distinct purposes:
 
-- The `tileir-to-mlir` submodule entry in this repository pins the
+- The `backends/tileir-to-mlir` submodule entry in this repository pins the
    TileIRToMLIR source commit.
-- `tileir-to-mlir/llvm-revision.txt` records the minimum LLVM commit required
+- `backends/tileir-to-mlir/llvm-revision.txt` records the minimum LLVM commit required
    by TileIRToMLIR. This filename belongs to the TileIRToMLIR submodule and is
    therefore kept as defined upstream.
 
@@ -129,15 +150,16 @@ CPU ABI: one pointer to immutable eight-byte argument slots, followed by six
 Before general MLIR lowering, CPU compilation applies a schedule from
 [cpu_schedule.mlir](cpu/cpu_schedule.mlir) selected by the host: generic patterns
 on any host, x86 contraction-loop preparation on x86-64, and the AMX lowering only
-on hosts reporting `amx_tile`, `amx_bf16`, and `amx_int8`. Final LLVM conversion
+on hosts with AMX tile, BF16, and INT8 support. Final LLVM conversion
 lowers x86 AMX operations and loop-carried tile types together with control
-flow. On Linux x86-64 hosts with AMX tile support, the
-native launcher requests the required process-wide tile-data permission when
-imported, before executing AMX kernels; permission failures raise an error.
+flow. On such Linux x86-64 hosts, the native launcher requests the required
+process-wide tile-data permission when imported; if the kernel denies it,
+kernels use the x86 lowering without AMX.
 
 ```bash
-CUTILE_BUILD_VARIANT=cpu uv sync --extra cpu
+CUTILE_BUILD_VARIANT=cpu uv sync --group cpu --no-build-isolation-package cuda-tile
 python samples/cpu/VectorAddition-cpu.py --correctness-check
+python -m pytest backends
 ```
 
 The first build creates a persistent LLVM build in `build/llvm`, with
@@ -158,24 +180,26 @@ coordinate array. In a `ct.backend_options` block, `num_cpu_threads` selects
 the worker count; zero (the default) uses OpenMP's maximum thread count and
 honors `OMP_NUM_THREADS`. One thread and single-block grids bypass parallel
 dispatch. The thread count is a launch option and does not recompile kernels.
+Autotuning results are scoped to the backend, array device and effective backend
+options, including launch-only options such as the CPU thread count.
 The `assume_in_bounds` option skips bounds checks of tile loads and stores.
 `CUTILE_CPU_DUMP_MLIR` writes the lowered MLIR to a file. Kernels are loaded from
 temporary files, so `TMPDIR` must allow executable files.
 
-Reusing custom LLVM and TileIRToMLIR builds
--------------------------------------------
+Reusing a prebuilt native compiler
+----------------------------------
 
-Build LLVM with the TileIRToMLIR and cuTileCompiler external projects, then
-install into a common prefix. The installation must use the required LLVM
-revision and provide `lib/_compiler<EXT_SUFFIX>` for the active Python version
-and XPU variant, plus the MLIR Level Zero runtime and
-`share/cutile/llvm/LICENSE.TXT`. Installing the `cuTileCompiler` CMake component
-stages the compiler and this notice together. Consuming the prefix does not
-require an LLVM source checkout.
+To skip building LLVM, build LLVM with the TileIRToMLIR and cuTileCompiler external
+projects, then install into a common prefix. The installation must use the required
+LLVM revision and provide `lib/_compiler<EXT_SUFFIX>` for the active Python version
+and build variant, plus `share/cutile/llvm/LICENSE.TXT`.
+Installing the `cuTileCompiler` CMake component stages the compiler
+and this notice together. Consuming the prefix does not require an LLVM source
+checkout or network access.
 
 ```bash
-CMAKE_ARGS="-DCUTILE_XPU_MONOLITHIC_INSTALL_DIR=/path/to/prefix" \
-   CUTILE_BUILD_VARIANT=xpu uv sync --extra xpu
+CMAKE_ARGS="-DCUTILE_TOOLCHAIN_DIR=/path/to/prefix" CUTILE_BUILD_VARIANT=xpu \
+   uv sync --group xpu --no-build-isolation-package cuda-tile
 ```
 
 Running on XPU
@@ -189,8 +213,7 @@ Running on XPU
    . <path-to>/intel-gpu/latest/intel_gpu_vars.sh
    ```
 
-   Adjust the script paths for the local Intel software installation. The MLIR
-   Level Zero runtime is packaged with the native launcher.
+   Adjust the script paths for the local Intel software installation.
 2. The native compiler uses `libocloc` in-process. Intel's offline compiler
    libraries, Level Zero loader, and GPU driver remain external dependencies
    provided by the environment scripts above; the build requires the
@@ -203,6 +226,15 @@ Running on XPU
 
    Optional environment variables: `CUTILE_XPU_ARCH` selects the target architecture,
    `CUTILE_XPU_DUMP_MLIR` dumps the generated MLIR.
+3. Kernels run synchronously on Level Zero device 0 (`xpu:0`), through checked
+   Level Zero calls: the launcher uses a private context, separate from PyTorch's, and the
+   launch waits for the caller's stream first. Select the device with
+   `ZE_AFFINITY_MASK`; arrays on other devices are rejected.
+   Each compiled kernel owns its module, kernel and command list. Concurrent
+   launches of the same kernel are serialized; different kernels can run
+   independently. Driver and launch failures raise `RuntimeError`, with module
+   build logs when available, rather than terminating Python. The MLIR Level
+   Zero runtime is not built or packaged.
 
 How to adapt an existing cuTile program
 ---------------------------------------
@@ -210,10 +242,9 @@ How to adapt an existing cuTile program
 1. Select the backend with `ct.set_backend("xpu")`.
 2. Use XPU tensors and streams: replace `tensor.is_cuda` with `tensor.is_xpu`, and
    `torch.cuda.current_stream()` with `torch.xpu.current_stream()`.
-3. Remove CUDA-specific kernel hints such as `occupancy` and `num_ctas`. Optionally wrap
-   launches in `ct.backend_options(...)` to set the launch block, either directly with
-   `block_threads` or derived from the tile sizes `wg_m`, `wg_n`, `sg_m`, and `sg_n`
-   (given together).
+3. Optionally wrap launches in `ct.backend_options(...)` to set the launch block, either
+   directly with `block_threads` or derived from the tile sizes `wg_m`, `wg_n`, `sg_m`,
+   and `sg_n` (given together).
 4. Respect the XPU schedule's tile-alignment requirements. Validate the input dimensions before
    launch, and reshape or pad inputs when the selected tile sizes require it.
 5. Work around uses of CAS spin loops or lock-based atomic accumulation.

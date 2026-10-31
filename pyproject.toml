@@ -38,34 +38,8 @@ dependencies = [
   "typing-extensions",
 ]
 
-# Installed by `uv sync`, which builds cuda-tile in this environment so that the
-# persistent CMake build tree keeps referring to the same Python and nanobind.
-[dependency-groups]
-build = [
-    "setuptools==84.0.0",
-    "wheel",
-    "cmake>=3.24,<4",
-    "ninja",
-    "nanobind>=2.9,<3",
-    "pybind11>=2.13.1",
-    "patchelf; sys_platform == 'linux'",
-    # CUDA headers for building the _cext extension without a CUDA Toolkit, as
-    # for the cpu and xpu variants; running those variants does not need CUDA.
-    "cuda-toolkit[cudart,nvvm]>=13.2,<13.6; sys_platform == 'linux'",
-]
-
 [project.optional-dependencies]
 tileiras = [ "cuda-toolkit[tileiras,nvcc,nvvm]>=13.2,<13.6" ]
-cpu = [
-    "numpy",
-    "torch",
-]
-xpu = [
-    "numpy",
-    "torch==2.13.0+xpu; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-    # A dependency of torch, listed so that uv takes it from the PyTorch XPU index.
-    "triton-xpu==3.7.2; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-]
 
 [project.urls]
 Homepage = "https://github.com/nvidia/cutile-python"
@@ -102,12 +76,41 @@ include = [
 "cuda.tile._backend.cpu" = ["*.mlir"]
 
 
+# Development environments of the non-CUDA variants, which build cuda-tile from
+# source without build isolation (see backends/README.md):
+#   CUTILE_BUILD_VARIANT=cpu uv sync --group cpu --no-build-isolation-package cuda-tile
+# Dependency groups are not part of the package metadata.
+[dependency-groups]
+backend-build = [
+    # Without build isolation, [build-system] requirements must be installed too.
+    "setuptools==84.0.0",
+    "wheel",
+    "cmake>=3.24,<4",
+    "ninja",
+    "nanobind>=2.9,<3",
+    "pybind11>=2.13.1",
+    "patchelf; sys_platform == 'linux'",
+    # CUDA headers for building _cext without a CUDA Toolkit.
+    "cuda-toolkit[cudart,nvvm]>=13.2,<13.6; sys_platform == 'linux'",
+]
+cpu = [
+    { include-group = "backend-build" },
+    "numpy",
+    "torch",
+]
+xpu = [
+    { include-group = "backend-build" },
+    "numpy",
+    "torch==2.13.0+xpu; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # A dependency of torch, listed so that uv takes it from the PyTorch XPU index.
+    "triton-xpu==3.7.2; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+
 [tool.uv]
 managed = true
-no-build-isolation-package = ["cuda-tile"]
-default-groups = ["build"]
 conflicts = [
-    [{ extra = "cpu" }, { extra = "xpu" }],
+    [{ group = "cpu" }, { group = "xpu" }],
 ]
 # Without this, uv derives a key from `packages.find.where` and stores it as an
 # mtime while comparing it as an inode, so it rebuilds on every sync.
@@ -117,16 +120,13 @@ cache-keys = [
     { file = "CMakeLists.txt" },
     { file = "cmake/**" },
     { file = "cext/**" },
-    # Backend build sources only: installed binaries also live in this tree.
-    { file = "src/cuda/tile/_backend/**/CMakeLists.txt" },
-    { file = "src/cuda/tile/_backend/**/*.cmake" },
-    { file = "src/cuda/tile/_backend/**/*.in" },
-    { file = "src/cuda/tile/_backend/**/*.cpp" },
-    { file = "src/cuda/tile/_backend/**/*.h" },
-    { file = "tileir-to-mlir/llvm-revision.txt" },
-    { file = "tileir-to-mlir/CMakeLists.txt" },
-    { file = "tileir-to-mlir/include/**" },
-    { file = "tileir-to-mlir/lib/**" },
+    # Native sources of the non-CUDA variants.
+    { file = "backends/**/CMakeLists.txt" },
+    { file = "backends/**/*.cmake" },
+    { file = "backends/**/*.in" },
+    { file = "backends/**/*.cpp" },
+    { file = "backends/**/*.h" },
+    { file = "backends/tileir-to-mlir/**" },
     { env = "CUTILE_BUILD_VARIANT" },
     { env = "CMAKE_ARGS" },
     { env = "USE_LLVM_REVISION" },
@@ -144,7 +144,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-xpu", extra = "xpu" },
+    { index = "pytorch-cpu", group = "cpu" },
+    { index = "pytorch-xpu", group = "xpu" },
 ]
 triton-xpu = { index = "pytorch-xpu" }

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import struct
 from typing import Any, NamedTuple
 
 import cuda.tile as ct
@@ -18,9 +19,11 @@ from cuda.tile.compilation import (
 )
 
 
-# The native launcher (cext/tile_kernel.cpp) derives layout assumptions for at
-# most this many dimensions; matching it keeps signatures backend-independent.
+# The native launcher (cext/tile_kernel.cpp) derives layout assumptions,
+# including static size-one shapes, for at most this many dimensions.
 _MAX_SPECIALIZED_NDIM = 5
+
+_CUTILE_PYTHON_V2 = CallingConvention.cutile_python_v2()
 
 # Struct format of each runtime scalar dtype, as passed to a backend kernel.
 _SCALAR_FORMATS = {
@@ -30,6 +33,11 @@ _SCALAR_FORMATS = {
 }
 
 
+def constant_key(value):
+    """Preserve the type and float bits used by ConstantConstraint and mangling."""
+    return type(value), struct.pack("=d", value) if isinstance(value, float) else value
+
+
 class ArrayArgument(NamedTuple):
     """An array kernel argument as passed to a backend's ``launch``."""
 
@@ -37,7 +45,8 @@ class ArrayArgument(NamedTuple):
     shape: tuple[int, ...]
     strides: tuple[int, ...]  # in elements
     dtype: Any
-    device: str
+    device: str  # device type, e.g. "cpu"
+    device_index: int
 
 
 def array_metadata(value: Any) -> ArrayArgument:
@@ -47,7 +56,8 @@ def array_metadata(value: Any) -> ArrayArgument:
         device = getattr(value, "device", "cpu")
         return ArrayArgument(int(data_ptr()), tuple(map(int, value.shape)),
                              tuple(map(int, value.stride())), value.dtype,
-                             getattr(device, "type", device))
+                             getattr(device, "type", device),
+                             getattr(device, "index", None) or 0)
     if not hasattr(value, "__array_interface__"):
         raise TypeError(
             f"expected an array with data_ptr() or __array_interface__, got "
@@ -59,7 +69,7 @@ def array_metadata(value: Any) -> ArrayArgument:
     if any(stride % itemsize for stride in value.strides):
         raise ValueError("array strides must be multiples of the element size")
     strides = tuple(stride // itemsize for stride in value.strides)
-    return ArrayArgument(value.ctypes.data, value.shape, strides, value.dtype, "cpu")
+    return ArrayArgument(value.ctypes.data, value.shape, strides, value.dtype, "cpu", 0)
 
 
 def scalar_format(backend: str, dtype) -> str:
@@ -120,7 +130,8 @@ def _normalized_dims(dims, ndim: int, name: str) -> tuple[int, ...]:
     return tuple(normalized)
 
 
-def _array_constraint(array: ArrayArgument, annotation, *, base_addr_divisible_by: int):
+def _array_constraint(array: ArrayArgument, annotation, *, base_addr_divisible_by: int,
+                      infer_shape_one: bool):
     try:
         dtype = to_dtype(array.dtype)
     except KeyError:
@@ -147,8 +158,8 @@ def _array_constraint(array: ArrayArgument, annotation, *, base_addr_divisible_b
     align_bits = 16 * 8
     stride_divisor = (align_bits // dtype.bitwidth
                       if align_bits % dtype.bitwidth == 0 else 1)
-    # As in the native launcher, annotated static strides replace the inference
-    # of unit strides for all dimensions.
+    # As in the native launcher, annotated static strides and shapes replace the
+    # inference of unit strides and size-one shapes, respectively.
     if static_stride_dims:
         stride_constant = tuple(strides[i] if i in static_stride_dims else None
                                 for i in range(ndim))
@@ -163,8 +174,11 @@ def _array_constraint(array: ArrayArgument, annotation, *, base_addr_divisible_b
         alias_groups=(),
         may_alias_internally=not _elements_disjoint(shape, strides),
         stride_constant=stride_constant,
-        shape_constant=tuple(shape[i] if i in static_shape_dims else None
-                             for i in range(ndim)),
+        shape_constant=tuple(
+            shape[i] if i in static_shape_dims
+            else 1 if (infer_shape_one and specialize and not static_shape_dims
+                       and shape[i] == 1)
+            else None for i in range(ndim)),
         stride_divisible_by=tuple(
             stride_divisor if specialize and stride % stride_divisor == 0 else 1
             for stride in strides),
@@ -203,9 +217,22 @@ def constant_parameters(kernel) -> tuple[bool, ...]:
                  for annotation in kernel._annotated_function.parameter_annotations)
 
 
+def _requires_cutile_python_v2(parameter) -> bool:
+    return (isinstance(parameter, ArrayConstraint)
+            and any(size is not None for size in parameter.shape_constant))
+
+
 def build_signature(kernel, args, *, calling_convention=None,
                     base_addr_divisible_by=16, symbol=None) -> KernelSignature:
-    """Python counterpart of ``KernelSignature.from_kernel_args`` for any backend."""
+    """The signature the CUDA launcher derives for ``args``, for any backend.
+
+    Without ``calling_convention``, as for CUDA launches, size-one dimensions
+    become static shapes and the lowest sufficient calling convention is used.
+    Otherwise this matches ``KernelSignature.from_kernel_args``, which infers
+    static shapes only for ``cutile_python_v2`` and later.
+    """
+    infer_shape_one = (calling_convention is None
+                       or calling_convention.version >= _CUTILE_PYTHON_V2.version)
     annotations = _leaf_annotations(kernel)
     if len(args) != len(annotations):
         raise TypeError(
@@ -224,9 +251,12 @@ def build_signature(kernel, args, *, calling_convention=None,
             parameters.append(_array_constraint(
                 array, annotation.array,
                 base_addr_divisible_by=base_addr_divisible_by,
+                infer_shape_one=infer_shape_one,
             ))
 
-    convention = calling_convention or CallingConvention.cutile_python_v1()
+    convention = calling_convention or (
+        _CUTILE_PYTHON_V2 if any(map(_requires_cutile_python_v2, parameters))
+        else CallingConvention.cutile_python_v1())
     signature = KernelSignature(parameters, convention, symbol)
     if symbol is None:
         signature = signature.with_mangled_symbol(

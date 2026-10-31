@@ -1,4 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+//
 // SPDX-License-Identifier: Apache-2.0
 
 #include "compiler.h"
@@ -164,7 +165,7 @@ static std::string compileCPU(llvm::StringRef bytecode,
   auto module = compilation.readTileIR(bytecode);
   compilation.lowerTileIR(
       *module,
-      "target=cpu append-grid-args=true drop-rounding-modes=true "
+      "target=cpu append-grid-args=true "
       "assume-in-bounds=" +
           std::string(assumeInBounds ? "true" : "false"),
       [&](mlir::OpPassManager &pm) {

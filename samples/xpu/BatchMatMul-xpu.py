@@ -60,22 +60,6 @@ def bmm(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype, options: dict)
     return output
 
 
-def torch_batch_matmul_fp8(A: torch.Tensor, B: torch.Tensor, options: dict) -> torch.Tensor:
-    inv_sa = torch.tensor(1.0, device=A.device, dtype=torch.float32)
-    inv_sb = torch.tensor(1.0, device=B.device, dtype=torch.float32)
-    bs = A.shape[0]
-    C = torch.empty((bs, A.shape[1], B.shape[2]), device=A.device, dtype=torch.float32)
-    for i in range(bs):
-        # Only multiplication of row-major and column-major matrices is supported by cuBLASLt
-        # So we need to transpose B to column-major view
-        A_row = A[i].contiguous()
-        B_col = B[i].transpose(-2, -1).contiguous().transpose(-2, -1)
-        C[i] = torch._scaled_mm(
-            A_row, B_col, scale_a=inv_sa, scale_b=inv_sb, out_dtype=torch.float32
-        )
-    return C
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -114,28 +98,6 @@ if __name__ == "__main__":
     else:
         print("Correctness check disabled")
 
-    # --- Test Case 2: Standard BMM (float8_e4m3fn) ---
-    # print("\n--- Test 2: Standard BMM (float8_e4m3fn) ---")
-    # if torch.xpu.get_device_capability()[0] == 8:
-    #     print("skip: Ampere does not support float8")
-    # else:
-    #     A_fp8 = torch.randn(
-    #         BATCH_DIM, M_DIM, K_DIM, dtype=torch.float32, device='xpu'
-    #     ).to(torch.float8_e4m3fn)
-    #     B_fp8 = torch.randn(
-    #         BATCH_DIM, K_DIM, N_DIM, dtype=torch.float32, device='xpu'
-    #     ).to(torch.float8_e4m3fn)
-    #     print(f"Input A shape: {A_fp8.shape}, dtype: {A_fp8.dtype}")
-    #     print(f"Input B shape: {B_fp8.shape}, dtype: {B_fp8.dtype}")
-
-    #     C_bmm_cutile_fp32 = bmm(A_fp8, B_fp8, torch.float32)
-    #     print(f"""cuTile Standard BMM Output C
-    #             shape:{C_bmm_cutile_fp32.shape},
-    #             dtype: {C_bmm_cutile_fp32.dtype}""")
-    #     if args.correctness_check:
-    #         torch.testing.assert_close(C_bmm_cutile_fp32, torch_batch_matmul_fp8(A_fp8, B_fp8))
-    #         print("Correctness check passed")
-    #     else:
-    #         print("Correctness check disabled")
+    # Test Case 2 (float8_e4m3fn) of the CUDA sample is not ported to XPU yet.
 
     print("\n--- cuTile Batched Matrix Multiplication (Standard Tiled) examples complete ---")

@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 
 # Runtime files staged by `cmake --install <build> --prefix src`; extension

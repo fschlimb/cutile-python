@@ -2,18 +2,18 @@ version = 1
 revision = 3
 requires-python = ">=3.11, <3.16"
 resolution-markers = [
-    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu'",
-    "(python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (python_full_version >= '3.12' and platform_machine != 'x86_64' and extra != 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (python_full_version >= '3.12' and sys_platform != 'linux' and extra != 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')",
-    "python_full_version < '3.12' and extra != 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu'",
-    "python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'extra-9-cuda-tile-cpu' and extra != 'extra-9-cuda-tile-xpu'",
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-9-cuda-tile-cpu' and extra != 'extra-9-cuda-tile-xpu'",
-    "python_full_version < '3.12' and sys_platform != 'darwin' and extra == 'extra-9-cuda-tile-cpu' and extra != 'extra-9-cuda-tile-xpu'",
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-9-cuda-tile-cpu' and extra != 'extra-9-cuda-tile-xpu'",
-    "extra != 'extra-9-cuda-tile-cpu' and extra != 'extra-9-cuda-tile-xpu'",
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu'",
+    "(python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (python_full_version >= '3.12' and platform_machine != 'x86_64' and extra != 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (python_full_version >= '3.12' and sys_platform != 'linux' and extra != 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')",
+    "python_full_version < '3.12' and extra != 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu'",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'group-9-cuda-tile-cpu' and extra != 'group-9-cuda-tile-xpu'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'group-9-cuda-tile-cpu' and extra != 'group-9-cuda-tile-xpu'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and extra == 'group-9-cuda-tile-cpu' and extra != 'group-9-cuda-tile-xpu'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'group-9-cuda-tile-cpu' and extra != 'group-9-cuda-tile-xpu'",
+    "extra != 'group-9-cuda-tile-cpu' and extra != 'group-9-cuda-tile-xpu'",
 ]
 conflicts = [[
-    { package = "cuda-tile", extra = "cpu" },
-    { package = "cuda-tile", extra = "xpu" },
+    { package = "cuda-tile", group = "cpu" },
+    { package = "cuda-tile", group = "xpu" },
 ]]
 
 [[package]]
@@ -50,48 +50,59 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-cpu = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-9-cuda-tile-cpu') or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-9-cuda-tile-cpu') or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "torch", version = "2.13.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-9-cuda-tile-cpu') or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-9-cuda-tile-cpu') or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-]
 tileiras = [
     { name = "cuda-toolkit", extra = ["nvcc", "nvvm", "tileiras"] },
 ]
-xpu = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'extra-9-cuda-tile-xpu') or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-9-cuda-tile-xpu') or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "torch", version = "2.13.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "triton-xpu", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
-]
 
 [package.dev-dependencies]
-build = [
+backend-build = [
     { name = "cmake" },
-    { name = "cuda-toolkit", extra = ["cudart", "nvvm"], marker = "sys_platform == 'linux' or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
+    { name = "cuda-toolkit", extra = ["cudart", "nvvm"], marker = "sys_platform == 'linux' or (extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
     { name = "nanobind" },
     { name = "ninja" },
-    { name = "patchelf", marker = "sys_platform == 'linux' or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
+    { name = "patchelf", marker = "sys_platform == 'linux' or (extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
     { name = "pybind11" },
     { name = "setuptools" },
+    { name = "wheel" },
+]
+cpu = [
+    { name = "cmake" },
+    { name = "cuda-toolkit", extra = ["cudart", "nvvm"], marker = "(sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu') or (extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "nanobind" },
+    { name = "ninja" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'group-9-cuda-tile-cpu') or (extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'group-9-cuda-tile-cpu') or (extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "patchelf", marker = "sys_platform == 'linux'" },
+    { name = "pybind11" },
+    { name = "setuptools" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'group-9-cuda-tile-cpu') or (extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'group-9-cuda-tile-cpu') or (extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "wheel" },
+]
+xpu = [
+    { name = "cmake" },
+    { name = "cuda-toolkit", extra = ["cudart", "nvvm"], marker = "(sys_platform == 'linux' and extra == 'group-9-cuda-tile-xpu') or (extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "nanobind" },
+    { name = "ninja" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and extra == 'group-9-cuda-tile-xpu') or (extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'group-9-cuda-tile-xpu') or (extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "patchelf", marker = "sys_platform == 'linux'" },
+    { name = "pybind11" },
+    { name = "setuptools" },
+    { name = "torch", version = "2.13.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" }, marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "triton-xpu", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "wheel" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "cuda-toolkit", extras = ["nvcc", "nvvm", "tileiras"], marker = "extra == 'tileiras'", specifier = ">=13.2,<13.6" },
-    { name = "numpy", marker = "extra == 'cpu'" },
-    { name = "numpy", marker = "extra == 'xpu'" },
-    { name = "torch", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'xpu'", specifier = "==2.13.0+xpu", index = "https://download.pytorch.org/whl/xpu", conflict = { package = "cuda-tile", extra = "xpu" } },
-    { name = "torch", marker = "extra == 'cpu'", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "cuda-tile", extra = "cpu" } },
-    { name = "triton-xpu", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'xpu'", specifier = "==3.7.2", index = "https://download.pytorch.org/whl/xpu" },
     { name = "typing-extensions" },
 ]
-provides-extras = ["tileiras", "cpu", "xpu"]
+provides-extras = ["tileiras"]
 
 [package.metadata.requires-dev]
-build = [
+backend-build = [
     { name = "cmake", specifier = ">=3.24,<4" },
     { name = "cuda-toolkit", extras = ["cudart", "nvvm"], marker = "sys_platform == 'linux'", specifier = ">=13.2,<13.6" },
     { name = "nanobind", specifier = ">=2.9,<3" },
@@ -99,6 +110,31 @@ build = [
     { name = "patchelf", marker = "sys_platform == 'linux'" },
     { name = "pybind11", specifier = ">=2.13.1" },
     { name = "setuptools", specifier = "==84.0.0" },
+    { name = "wheel" },
+]
+cpu = [
+    { name = "cmake", specifier = ">=3.24,<4" },
+    { name = "cuda-toolkit", extras = ["cudart", "nvvm"], marker = "sys_platform == 'linux'", specifier = ">=13.2,<13.6" },
+    { name = "nanobind", specifier = ">=2.9,<3" },
+    { name = "ninja" },
+    { name = "numpy" },
+    { name = "patchelf", marker = "sys_platform == 'linux'" },
+    { name = "pybind11", specifier = ">=2.13.1" },
+    { name = "setuptools", specifier = "==84.0.0" },
+    { name = "torch", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "cuda-tile", group = "cpu" } },
+    { name = "wheel" },
+]
+xpu = [
+    { name = "cmake", specifier = ">=3.24,<4" },
+    { name = "cuda-toolkit", extras = ["cudart", "nvvm"], marker = "sys_platform == 'linux'", specifier = ">=13.2,<13.6" },
+    { name = "nanobind", specifier = ">=2.9,<3" },
+    { name = "ninja" },
+    { name = "numpy" },
+    { name = "patchelf", marker = "sys_platform == 'linux'" },
+    { name = "pybind11", specifier = ">=2.13.1" },
+    { name = "setuptools", specifier = "==84.0.0" },
+    { name = "torch", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==2.13.0+xpu", index = "https://download.pytorch.org/whl/xpu", conflict = { package = "cuda-tile", group = "xpu" } },
+    { name = "triton-xpu", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = "==3.7.2", index = "https://download.pytorch.org/whl/xpu" },
     { name = "wheel" },
 ]
 
@@ -112,22 +148,22 @@ wheels = [
 
 [package.optional-dependencies]
 cudart = [
-    { name = "nvidia-cuda-runtime", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
+    { name = "nvidia-cuda-runtime", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
 ]
 nvcc = [
-    { name = "nvidia-cuda-crt", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "nvidia-cuda-nvcc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "nvidia-cuda-runtime", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "nvidia-nvvm", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
+    { name = "nvidia-cuda-crt", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "nvidia-cuda-nvcc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "nvidia-cuda-runtime", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "nvidia-nvvm", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
 ]
 nvvm = [
-    { name = "nvidia-nvvm", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
+    { name = "nvidia-nvvm", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
 ]
 tileiras = [
-    { name = "nvidia-cuda-nvcc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "nvidia-cuda-tileiras", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "nvidia-nvvm", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
+    { name = "nvidia-cuda-nvcc", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "nvidia-cuda-tileiras", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "nvidia-nvjitlink", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
+    { name = "nvidia-nvvm", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32') or (sys_platform != 'linux' and sys_platform != 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'linux' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (sys_platform == 'win32' and extra == 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')" },
 ]
 
 [[package]]
@@ -254,7 +290,7 @@ name = "jinja2"
 version = "3.1.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "markupsafe", marker = "(python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-9-cuda-tile-xpu') or extra == 'extra-9-cuda-tile-cpu'" },
+    { name = "markupsafe", marker = "(python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-9-cuda-tile-xpu') or extra == 'group-9-cuda-tile-cpu'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d", size = 245115, upload-time = "2025-03-05T20:05:02.478Z" }
 wheels = [
@@ -407,9 +443,9 @@ name = "numpy"
 version = "2.4.6"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.12' and extra != 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu'",
-    "python_full_version < '3.12' and sys_platform != 'darwin' and extra == 'extra-9-cuda-tile-cpu' and extra != 'extra-9-cuda-tile-xpu'",
-    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'extra-9-cuda-tile-cpu' and extra != 'extra-9-cuda-tile-xpu'",
+    "python_full_version < '3.12' and extra != 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu'",
+    "python_full_version < '3.12' and sys_platform != 'darwin' and extra == 'group-9-cuda-tile-cpu' and extra != 'group-9-cuda-tile-xpu'",
+    "python_full_version < '3.12' and sys_platform == 'darwin' and extra == 'group-9-cuda-tile-cpu' and extra != 'group-9-cuda-tile-xpu'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d0/ad/fed0499ce6a338d2a03ebae59cd15093910c8875328855781952abf6c2fe/numpy-2.4.6.tar.gz", hash = "sha256:f3a3570c4a2a16746ac2c31a7c7c7b0c186b95ce902e33db6f28094ed7387dda", size = 20735807, upload-time = "2026-05-18T23:37:14.07Z" }
 wheels = [
@@ -491,10 +527,10 @@ name = "numpy"
 version = "2.5.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu'",
-    "(python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (python_full_version >= '3.12' and platform_machine != 'x86_64' and extra != 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu') or (python_full_version >= '3.12' and sys_platform != 'linux' and extra != 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')",
-    "python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'extra-9-cuda-tile-cpu' and extra != 'extra-9-cuda-tile-xpu'",
-    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'extra-9-cuda-tile-cpu' and extra != 'extra-9-cuda-tile-xpu'",
+    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu'",
+    "(python_full_version >= '3.13' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra != 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (python_full_version >= '3.12' and platform_machine != 'x86_64' and extra != 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu') or (python_full_version >= '3.12' and sys_platform != 'linux' and extra != 'group-9-cuda-tile-cpu' and extra == 'group-9-cuda-tile-xpu')",
+    "python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'group-9-cuda-tile-cpu' and extra != 'group-9-cuda-tile-xpu'",
+    "python_full_version >= '3.12' and sys_platform == 'darwin' and extra == 'group-9-cuda-tile-cpu' and extra != 'group-9-cuda-tile-xpu'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9a/80/db0b4559e57ec36362bedbb05530a87fafbcb6067708c946967a41d449e7/numpy-2.5.2.tar.gz", hash = "sha256:d482d171c406ae88c5b19cad3b6a1c4c5209f886ab74bc44c2c865c23f52d860", size = 20773161, upload-time = "2026-08-09T13:48:27.962Z" }
 wheels = [
@@ -580,9 +616,9 @@ name = "nvidia-cuda-nvcc"
 version = "13.3.73"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cuda-crt", marker = "sys_platform != 'darwin' or extra != 'extra-9-cuda-tile-cpu' or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "nvidia-cuda-runtime", marker = "sys_platform != 'darwin' or extra != 'extra-9-cuda-tile-cpu' or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "nvidia-nvvm", marker = "sys_platform != 'darwin' or extra != 'extra-9-cuda-tile-cpu' or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
+    { name = "nvidia-cuda-crt" },
+    { name = "nvidia-cuda-runtime" },
+    { name = "nvidia-nvvm" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5c/14/9f5cdc994d5431e2f08f62ffe34509e7feabd1f2e18517e2d7720c6ff0fd/nvidia_cuda_nvcc-13.3.73-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:70f250825355d2c3aa6c7a972a0ec00f020bad66d2679e527eb4336301c904aa", size = 39515578, upload-time = "2026-06-29T16:47:40.318Z" },
@@ -605,9 +641,9 @@ name = "nvidia-cuda-tileiras"
 version = "13.3.36"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cuda-nvcc", marker = "sys_platform != 'darwin' or extra != 'extra-9-cuda-tile-cpu' or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "nvidia-nvjitlink", marker = "sys_platform != 'darwin' or extra != 'extra-9-cuda-tile-cpu' or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
-    { name = "nvidia-nvvm", marker = "sys_platform != 'darwin' or extra != 'extra-9-cuda-tile-cpu' or (extra == 'extra-9-cuda-tile-cpu' and extra == 'extra-9-cuda-tile-xpu')" },
+    { name = "nvidia-cuda-nvcc" },
+    { name = "nvidia-nvjitlink" },
+    { name = "nvidia-nvvm" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4b/bd/89c65b2067a2a707cc92fad6d34e96ae53a495805f563642244649f9cee2/nvidia_cuda_tileiras-13.3.36-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:91510f8f9b4f4b3f3a365c43218b62873b5ae1474db6b32eb3ece7f0934496af", size = 36181023, upload-time = "2026-05-26T16:41:51.373Z" },
@@ -805,7 +841,7 @@ name = "sympy"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "mpmath", marker = "(python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'extra-9-cuda-tile-xpu') or extra == 'extra-9-cuda-tile-cpu'" },
+    { name = "mpmath", marker = "(python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-9-cuda-tile-xpu') or extra == 'group-9-cuda-tile-cpu'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [

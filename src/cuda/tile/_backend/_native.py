@@ -1,6 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
+"""The native compiler shared by the built-in backends."""
 
+import hashlib
 import importlib
 import json
 import os
@@ -10,6 +13,9 @@ import sys
 from cuda.tile._cext import default_tile_context
 from cuda.tile._exception import TileCompilerTimeoutError
 
+# TileIR bytecode version read by the native compiler's TileIRToMLIR.
+BYTECODE_VERSION = "13.3"
+
 
 def file_fingerprint(path: str) -> str:
     """Identify a file by canonical path and stat data, so any rebuild changes it."""
@@ -17,6 +23,13 @@ def file_fingerprint(path: str) -> str:
     stat = os.stat(resolved)
     return (f"{resolved}:{stat.st_dev}:{stat.st_ino}:{stat.st_size}:"
             f"{stat.st_mtime_ns}")
+
+
+def identity_digest(identity: dict) -> str:
+    """Digest of a JSON-serializable compiler identity."""
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def compiler(backend: str):

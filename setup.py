@@ -13,9 +13,9 @@ import sys
 project_root = os.path.dirname(os.path.realpath(__file__))
 is_windows = sys.platform == "win32"
 
-# Every build variant builds the _cext extension. Variants other than "cuda" also
-# build their backend's extension from src/cuda/tile/_backend, which also installs
-# their runtime files.
+# Every build variant builds the _cext extension. The non-CUDA variants (see
+# backends/README.md) also build their backend from backends/ and stage it, with
+# its runtime files, into cuda/tile/_backend with `cmake --install`.
 _backend_extensions = {
     "cpu": "cuda.tile._backend.cpu._cpu",
     "xpu": "cuda.tile._backend.xpu._level_zero",
@@ -26,17 +26,22 @@ if build_variant != "cuda" and build_variant not in _backend_extensions:
                        f"{', '.join(['cuda', *_backend_extensions])}")
 
 
-def _pip_cuda_toolkit_root():
-    """Root of the CUDA headers installed by the cuda-toolkit[cudart,nvvm] wheels."""
+def _backend_cmake_args():
+    """CMake arguments of the non-CUDA variants, including those from CMAKE_ARGS."""
+    args = shlex.split(os.getenv("CMAKE_ARGS", ""))
+    if "CUDAToolkit_ROOT" in os.environ:
+        return args
+    # Without a CUDA Toolkit, take the headers _cext needs from the
+    # cuda-toolkit[cudart,nvvm] wheels.
     try:
         import nvidia
     except ImportError:
-        return None
+        return args
     for path in nvidia.__path__:
         root = os.path.join(path, "cu13")
         if os.path.isfile(os.path.join(root, "include", "cuda.h")):
-            return root
-    return None
+            return [f"-DCUDAToolkit_ROOT={root}", *args]
+    return args
 
 
 class BuildExtWithCmake(build_ext):
@@ -80,12 +85,8 @@ class BuildExtWithCmake(build_ext):
                      f"-DPython_EXECUTABLE={sys.executable}",
                      "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
                      f"-DCUTILE_BUILD_VARIANT={build_variant}"]
-        if build_variant != "cuda" and "CUDAToolkit_ROOT" not in os.environ:
-            # Non-CUDA variants need only the CUDA headers to build _cext.
-            cuda_root = _pip_cuda_toolkit_root()
-            if cuda_root is not None:
-                cmake_cmd.append(f"-DCUDAToolkit_ROOT={cuda_root}")
-        cmake_cmd.extend(shlex.split(os.getenv("CMAKE_ARGS", "")))
+        if build_variant != "cuda":
+            cmake_cmd.extend(_backend_cmake_args())
         if self.disable_internal:
             cmake_cmd.append("-DDISABLE_INTERNAL=1")
         if self.minimal_internal:

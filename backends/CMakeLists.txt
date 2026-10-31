@@ -2,10 +2,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Builds the native parts of a non-CUDA backend selected by CUTILE_BUILD_VARIANT:
+# Builds the native parts of the non-CUDA backend selected by CUTILE_BUILD_VARIANT:
 # the native compiler and the backend's launcher extension. Installing
 # the build (`cmake --install <build> --prefix <site> --component cuTileBackend`)
-# stages them and their runtime files into <site>/cuda/tile/_backend.
+# stages them and their runtime files into <site>/cuda/tile/_backend, next to the
+# Python backend in src/cuda/tile/_backend.
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "The native CPU/XPU compilers currently support Linux only")
@@ -30,14 +31,15 @@ find_package(nanobind CONFIG REQUIRED)
 # Package directory of the backends, relative to the install prefix.
 set(CUTILE_BACKEND_INSTALL_DIR cuda/tile/_backend)
 
+set(CUTILE_TILEIR_TO_MLIR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tileir-to-mlir")
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TileIRToMLIR.cmake")
 
 install(FILES "${CUTILE_COMPILER_PATH}" DESTINATION "${CUTILE_BACKEND_INSTALL_DIR}")
 install(FILES "${CUTILE_LLVM_LICENSE_PATH}"
     DESTINATION "${CUTILE_BACKEND_INSTALL_DIR}/_licenses/llvm")
-install(FILES "${CMAKE_SOURCE_DIR}/tileir-to-mlir/LICENSE"
+install(FILES "${CUTILE_TILEIR_TO_MLIR_DIR}/LICENSE"
     DESTINATION "${CUTILE_BACKEND_INSTALL_DIR}/_licenses/tileir-to-mlir")
-install(FILES "${CMAKE_SOURCE_DIR}/tileir-to-mlir/third_party/cuda-tile/LICENSE.txt"
+install(FILES "${CUTILE_TILEIR_TO_MLIR_DIR}/third_party/cuda-tile/LICENSE.txt"
     DESTINATION "${CUTILE_BACKEND_INSTALL_DIR}/_licenses/cuda-tile")
 
 add_subdirectory("${CUTILE_BUILD_VARIANT}")

@@ -5,41 +5,44 @@
 
 Compilation runs TileIRToMLIR and XeVM passes in the private native compiler;
 the resulting device binary is launched through the native
-:mod:`cuda.tile._backend.xpu._level_zero` extension.
+:mod:`cuda.tile._backend.xpu._level_zero` extension with checked Level Zero calls.
 
 Select the backend and, optionally, tune the launch block::
 
     ct.set_backend("xpu")
     with ct.backend_options({"wg_m": 128, "wg_n": 128, "sg_m": 32, "sg_n": 32}):
         ct.launch(stream, grid, matmul_kernel, args)
+
+Kernels run synchronously on Level Zero device 0 (``xpu:0``), in a private
+Level Zero context rather than the caller's; select the device with
+``ZE_AFFINITY_MASK``.
 """
 import dataclasses
 import functools
-import hashlib
-import json
 import operator
 import os
 import struct
 from typing import Any, Mapping, NamedTuple
 
-from .._custom import bool_option, check_options, normalize_dims
-from .._custom import synchronize_stream as synchronize
-from .._signature import ArrayArgument, check_argument, runtime_parameters, scalar_format
+from cuda.tile.compilation import ArrayConstraint
+
+from .._native import BYTECODE_VERSION
 from .._native import compiler as native_compiler
-from .._native import file_fingerprint, invoke
+from .._native import file_fingerprint, identity_digest, invoke
+from .._signature import ArrayArgument, check_argument, runtime_parameters, scalar_format
+from .._util import bool_option, check_options, normalize_dims
+from .._util import synchronize_stream as synchronize
 from ._level_zero import Kernel as _LevelZeroKernel
 
-# cuTile identifies a compile target by an arch string. Xe devices get values
-# that cannot collide with a CUDA SM number, plus the ocloc chip to target.
-_ARCHS = {
-    "b70": ("1070", "bmg"),
-    "b50": ("1050", "bmg"),
-    "pvc": ("2000", "pvc"),
-}
+name = "xpu"
+bytecode_version = BYTECODE_VERSION
+
+# The ocloc chip of each supported architecture.
+_ARCHS = {"b70": "bmg", "b50": "bmg", "pvc": "pvc"}
 _DEFAULT_ARCH = "b70"
 
 
-def _arch(arch: str) -> tuple[str, str]:
+def _chip(arch: str) -> str:
     if arch not in _ARCHS:
         raise ValueError(
             f"XPU backend: unknown architecture {arch!r}; expected one of "
@@ -47,13 +50,7 @@ def _arch(arch: str) -> tuple[str, str]:
     return _ARCHS[arch]
 
 
-# Pinning the target means cuTile never probes a CUDA device (which would
-# dlopen libcuda) when this backend is active.
-sm_arch, _CHIP = _arch(os.environ.get("CUTILE_XPU_ARCH", _DEFAULT_ARCH))
-
-# Pin the TileIR bytecode version so cuTile does not probe the `tileiras`
-# compiler (which requires a CUDA toolkit) to auto-detect it.
-bytecode_version = "13.3"
+_CHIP = _chip(os.environ.get("CUTILE_XPU_ARCH", _DEFAULT_ARCH))
 
 _SUBGROUP_SIZE = 16
 
@@ -144,8 +141,7 @@ def compiler_identity(options: Options):
         compiler = native_compiler("xpu")
         fingerprint = file_fingerprint(compiler.__file__)
         identity = {
-            "schema": 3,
-            "sm_arch": sm_arch,
+            "schema": 4,
             "chip": _CHIP,
             "options": dataclasses.asdict(options),
             "compiler": fingerprint,
@@ -154,18 +150,17 @@ def compiler_identity(options: Options):
         }
     except OSError:
         return None
-    return hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return identity_digest(identity)
 
 
 def compile(bytecode: bytes, signature, options: Options) -> bytes:
     """Compile TileIR bytecode into an Xe binary without command-line tools."""
-    del signature
+    ranks = tuple(parameter.ndim if isinstance(parameter, ArrayConstraint) else -1
+                  for parameter in runtime_parameters("XPU", signature))
     return invoke(
         "xpu", "compile_xpu", bytecode, options.block, options.assume_in_bounds,
         options.xegpu_op_level, options.large_register_file, _CHIP,
-        bool(os.environ.get("CUTILE_XPU_DUMP_MLIR")))
+        bool(os.environ.get("CUTILE_XPU_DUMP_MLIR")), ranks)
 
 
 def _runtime_arguments(parameters, args) -> list:
@@ -174,6 +169,10 @@ def _runtime_arguments(parameters, args) -> list:
     for parameter, argument in zip(parameters, args, strict=True):
         check_argument("XPU", "xpu", parameter, argument)
         if isinstance(argument, ArrayArgument):
+            if argument.device_index != 0:
+                raise ValueError(
+                    f"XPU backend: array is on xpu:{argument.device_index}, but kernels "
+                    f"run on xpu:0; select the device with ZE_AFFINITY_MASK")
             runtime.append((argument.pointer, argument.shape, argument.strides))
         else:
             runtime.append(struct.pack(scalar_format("XPU", parameter.dtype), argument))
@@ -193,10 +192,10 @@ def load(binary: bytes, signature, options: Options) -> _Loaded:
 
 
 def launch(loaded: _Loaded, stream, grid, args):
-    """Run a loaded kernel synchronously through the Level Zero runtime."""
+    """Run a loaded kernel synchronously through checked Level Zero calls."""
     runtime_args = _runtime_arguments(loaded.parameters, args)
 
-    # The Level Zero runtime enqueues onto its own immediate command list, which
+    # The launcher enqueues onto its own immediate command list, which
     # is unordered with respect to ``stream``. Drain the caller's pending work
     # (e.g. the tensor initialisation) first, otherwise it can land after the
     # kernel and overwrite its results. The launch below blocks until the kernel

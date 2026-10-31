@@ -1,10 +1,13 @@
-// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+//
 // SPDX-License-Identifier: Apache-2.0
 
 #include "compiler.h"
 #include "cuda_tile/Bytecode/Reader/BytecodeReader.h"
+#include "cuda_tile/Dialect/CudaTile/IR/Attributes.h"
 #include "cuda_tile/Dialect/CudaTile/IR/Dialect.h"
 #include "mlir/Conversion/TileIRToMLIR/Passes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllExtensions.h"
 #include "mlir/Parser/Parser.h"
@@ -64,6 +67,25 @@ Compilation::readMLIR(llvm::StringRef source) {
 void Compilation::lowerTileIR(
     mlir::ModuleOp module, llvm::StringRef options,
     llvm::function_ref<void(mlir::OpPassManager &)> addBackendPasses) {
+  module.walk([](mlir::Operation *op) {
+    auto rounding = op->getAttrOfType<mlir::cuda_tile::RoundingModeAttr>(
+        "rounding_mode");
+    if (!rounding)
+      return;
+    using Mode = mlir::cuda_tile::RoundingMode;
+    switch (rounding.getValue()) {
+    case Mode::NEAREST_EVEN:
+    case Mode::APPROX:
+    case Mode::FULL:
+    case Mode::NEAREST_INT_TO_ZERO:
+      return;
+    default:
+      throw std::invalid_argument(
+          std::string(backendName) + " backend: unsupported rounding mode " +
+          mlir::cuda_tile::stringifyRoundingMode(rounding.getValue()).str() +
+          " on " + op->getName().getStringRef().str());
+    }
+  });
   mlir::PassManager pm(&context);
   auto onError = [&](const llvm::Twine &message) {
     diagnostics += message.str() + "\n";
@@ -75,6 +97,13 @@ void Compilation::lowerTileIR(
   // Translating TileIR source locations to LLVM IR crashes; drop them.
   pm.addPass(mlir::createStripDebugInfoPass());
   run(module, pm);
+  // Nearest-even is arith's default, including for narrowing casts.
+  module.walk([](mlir::Operation *op) {
+    auto rounding = op->getAttrOfType<mlir::arith::RoundingModeAttr>("roundingmode");
+    if (rounding &&
+        rounding.getValue() == mlir::arith::RoundingMode::to_nearest_even)
+      op->removeAttr("roundingmode");
+  });
 }
 
 void Compilation::run(mlir::ModuleOp module, mlir::PassManager &pm) {

@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
@@ -30,8 +31,8 @@ else()
 endif()
 """)
     binary = tmp_path / "shared build"
-    template = (Path(__file__).resolve().parents[2] / "src" / "cuda" / "tile" / "_backend"
-                / "cmake" / "BuildLLVM.cmake.in").read_text()
+    template = (Path(__file__).resolve().parents[2] / "backends" / "cmake"
+                / "BuildLLVM.cmake.in").read_text()
 
     def run(variant, check=True):
         script = tmp_path / f"build-{variant}.cmake"

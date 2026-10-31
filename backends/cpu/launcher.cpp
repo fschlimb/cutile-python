@@ -1,4 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+//
 // SPDX-License-Identifier: Apache-2.0
 
 #include <nanobind/nanobind.h>
@@ -16,11 +17,12 @@
 
 #if defined(__linux__) && defined(__x86_64__)
 #include <asm/prctl.h>
-#include <cerrno>
 #include <cpuid.h>
 #include <sys/syscall.h>
-#include <system_error>
 #include <unistd.h>
+#ifndef ARCH_REQ_XCOMP_PERM
+#define ARCH_REQ_XCOMP_PERM 0x1023
+#endif
 #endif
 
 namespace nb = nanobind;
@@ -28,16 +30,19 @@ using namespace nb::literals;
 
 namespace {
 
-void initializeAMX() {
+// Whether the host has AMX tile, BF16 and INT8 and this process may use tile
+// data. Linux grants that permission process-wide; without it, kernels use the
+// non-AMX lowering.
+bool enableAMX() {
 #if defined(__linux__) && defined(__x86_64__)
+  constexpr unsigned int amx = (1u << 22) | (1u << 24) | (1u << 25);
   unsigned int eax, ebx, ecx, edx;
-  if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) || !(edx & (1u << 24)))
-    return;
-  // Linux requires process-wide permission before any thread uses tile data.
+  if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) || (edx & amx) != amx)
+    return false;
   constexpr unsigned long tileData = 18;
-  if (syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, tileData) != 0)
-    throw std::system_error(errno, std::generic_category(),
-                            "CPU backend: unable to enable AMX tile data");
+  return syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, tileData) == 0;
+#else
+  return false;
 #endif
 }
 
@@ -125,7 +130,7 @@ private:
 } // namespace
 
 NB_MODULE(_cpu, module) {
-  initializeAMX();
+  module.attr("amx_enabled") = enableAMX();
   nb::class_<Kernel>(module, "Kernel")
       .def(nb::init<const std::string &, const std::string &, size_t>(),
            "path"_a, "symbol"_a, "argument_bytes"_a)

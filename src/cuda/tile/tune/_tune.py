@@ -258,8 +258,6 @@ def exhaustive_search(
         raise ValueError("Search space is empty.")
     if kernel is None and benchmark_fn is None:
         raise ValueError("kernel can only be None with benchmark_fn.")
-    if single_run_timeout_sec is not None and _backend.get_backend() is not None:
-        raise ValueError("single_run_timeout_sec is not supported by custom backends.")
     if single_run_timeout_sec is not None and benchmark_fn is not None:
         raise ValueError("single_run_timeout_sec is not supported with benchmark_fn.")
 
@@ -282,6 +280,10 @@ def exhaustive_search(
                 base_kernel = kernel if isinstance(kernel, TileKernel) else kernel(cfg)
                 hints = hints_fn(cfg) if hints_fn is not None else {}
                 updated_kernel = base_kernel.replace_hints(**hints)
+                if (single_run_timeout_sec is not None
+                        and _backend.backend_for(updated_kernel, args_fn(cfg)) is not None):
+                    raise ValueError(
+                        "single_run_timeout_sec is not supported by custom backends.")
         candidate = _TimingCandidate(
             config=cfg,
             grid=grid,
@@ -373,8 +375,8 @@ _TOP_K = 5
 
 
 def _benchmark_launch(stream, grid, kernel, args, flush_l2: bool) -> float:
-    """Time one launch in microseconds on the active custom backend or on CUDA."""
-    if _backend.get_backend() is not None:
+    """Time one launch in microseconds where :func:`cuda.tile.launch` would run it."""
+    if _backend.backend_for(kernel, args) is not None:
         return _backend.benchmark(stream, grid, kernel, args)
     return _benchmark(stream, grid, kernel, args, flush_l2)
 

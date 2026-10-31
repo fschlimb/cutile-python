@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+import struct
 import time
 from types import SimpleNamespace
 
@@ -21,7 +23,7 @@ def _kernel(x, scale: float, value: ct.Constant[int]):
 
 
 class _Backend:
-    sm_arch = "3000"
+    name = "test"
     bytecode_version = "13.3"
 
     def __init__(self, identity="test:v1"):
@@ -116,7 +118,8 @@ def test_launch_describes_each_array_once_and_drops_constants(
     ct.launch(None, (1,), _kernel, (second, 2.0, 4))
 
     assert [value is first or value is second for value in described] == [True, False] * 2
-    assert first_args == (ArrayArgument(first.ctypes.data, (16,), (1,), first.dtype, "cpu"), 1.0)
+    assert first_args == (
+        ArrayArgument(first.ctypes.data, (16,), (1,), first.dtype, "cpu", 0), 1.0)
     assert backend.launched_args[0].pointer == second.ctypes.data
     assert backend.launched_args[1] == 2.0
     assert backend.calls.count("compile") == 1
@@ -164,6 +167,50 @@ def test_runtime_scalar_values_do_not_rebuild_signatures(frontend, backend):
     assert built == [1.0]
 
 
+def test_signature_builder_tracks_alignment_above_4096(frontend, backend):
+    storage = np.zeros(32768, dtype=np.uint8)
+    offset = -storage.ctypes.data % 8192
+    aligned = storage[offset:offset + 16]
+    less_aligned = storage[offset + 4096:offset + 4112]
+
+    def builder(kernel, args):
+        return build_signature(kernel, args, base_addr_divisible_by=8192)
+
+    first = _backend.compile_for_launch(
+        _kernel, (aligned, 1.0, 4), signature_builder=builder)
+    second = _backend.compile_for_launch(
+        _kernel, (less_aligned, 1.0, 4), signature_builder=builder)
+    assert first is not second
+    assert first.signature.parameters[0].base_addr_divisible_by == 8192
+    assert second.signature.parameters[0].base_addr_divisible_by == 1
+    assert _backend.compile_for_launch(
+        _kernel, (aligned, 2.0, 4), signature_builder=builder) is first
+
+
+def test_signature_builder_tracks_non_power_of_two_alignment(frontend, backend):
+    class Tensor:
+        shape, dtype, device = (16,), np.dtype("uint8"), "cpu"
+
+        def __init__(self, pointer):
+            self.pointer = pointer
+
+        def data_ptr(self):
+            return self.pointer
+
+        def stride(self):
+            return (1,)
+
+    def builder(kernel, args):
+        return build_signature(kernel, args, base_addr_divisible_by=3)
+
+    first = _backend.compile_for_launch(
+        _kernel, (Tensor(12288), 1.0, 4), signature_builder=builder)
+    second = _backend.compile_for_launch(
+        _kernel, (Tensor(20480), 1.0, 4), signature_builder=builder)
+    assert first.signature.parameters[0].base_addr_divisible_by == 3
+    assert second.signature.parameters[0].base_addr_divisible_by == 1
+
+
 def test_constants_and_layouts_select_distinct_binaries(frontend, backend):
     x = np.zeros(32, dtype=np.float32)
 
@@ -173,6 +220,22 @@ def test_constants_and_layouts_select_distinct_binaries(frontend, backend):
 
     assert len({id(by_constant), id(by_layout), id(base)}) == 3
     assert backend.calls.count("compile") == 3
+
+
+@pytest.mark.parametrize("values", [
+    (0.0, -0.0),
+    (True, 1, 1.0),
+    tuple(struct.unpack("=d", struct.pack("=Q", bits))[0]
+          for bits in (0x7ff8000000000001, 0x7ff8000000000002)),
+])
+def test_constant_cache_preserves_types_and_float_bits(frontend, backend, values):
+    x, _, _ = _args()
+    compiled = [_backend.compile_for_launch(_kernel, (x, 1.0, value))
+                for value in values]
+    assert len({id(kernel) for kernel in compiled}) == len(values)
+    for value, kernel in zip(values, compiled):
+        assert _backend.compile_for_launch(_kernel, (x, 2.0, value)) is kernel
+    assert backend.calls.count("compile") == len(values)
 
 
 def test_same_signature_shares_the_loaded_binary(frontend, backend):
@@ -265,24 +328,123 @@ def test_benchmark_times_a_synchronized_launch(frontend, backend):
     assert backend.calls[-1] == "synchronize"
 
 
+def test_backend_protocol_lists_the_required_attributes():
+    assert set(_custom._BACKEND_ATTRIBUTES) == {
+        "name", "bytecode_version", "normalize_options", "compiler_identity",
+        "compile", "load", "launch", "synchronize"}
+
+
 def test_set_backend_rejects_incomplete_backends():
     with pytest.raises(TypeError, match="lacks .*load"):
         _backend.set_backend(SimpleNamespace(
-            sm_arch="3000", bytecode_version="13.3",
+            name="test", bytecode_version="13.3",
             normalize_options=None, compiler_identity=None, compile=None,
             launch=None, synchronize=None))
     assert _backend.get_backend() is None
 
 
-def test_launch_without_backend_uses_cuda(monkeypatch):
+@pytest.fixture
+def cuda_launches(monkeypatch):
     launches = []
-    monkeypatch.setattr(_custom, "_cext_launch", lambda *args: launches.append(args))
+    monkeypatch.setattr(_custom, "_cext_launch",
+                        lambda *args, **options: launches.append((args, options)))
+    return launches
 
-    ct.launch(None, (1,), _kernel, _args())
 
-    assert len(launches) == 1
+def test_launch_without_backend_uses_cuda(cuda_launches):
+    ct.launch(None, (1,), _kernel, _args(), programmatic_dependent_launch=True)
+
+    assert len(cuda_launches) == 1
+    assert cuda_launches[0][1] == {"programmatic_dependent_launch": True}
     with pytest.raises(RuntimeError, match="no backend"):
         _backend.compile_for_launch(_kernel, _args())
+
+
+class _CudaArray:
+    __cuda_array_interface__ = {}
+
+
+class _CudaTensor:
+    shape, dtype = (16,), np.float32
+    device = SimpleNamespace(type="cuda", index=0)
+
+    def data_ptr(self):
+        return 256
+
+    def stride(self):
+        return (1,)
+
+
+@dataclass
+class _Pair:
+    left: object
+    right: object
+
+
+@pytest.mark.parametrize("array", [_CudaArray(), _CudaTensor()])
+def test_cuda_arrays_bypass_the_backend(frontend, backend, cuda_launches, array):
+    ct.launch(None, (1,), _kernel, (array, 1.0, 4), programmatic_dependent_launch=True)
+
+    assert cuda_launches[0][1] == {"programmatic_dependent_launch": True}
+    assert _backend.backend_for(_kernel, (array, 1.0, 4)) is None
+    assert _backend.backend_for(_kernel, _args()) is backend
+    assert "compile" not in backend.calls
+
+
+@pytest.mark.parametrize("array", [_CudaArray(), _CudaTensor()])
+@pytest.mark.parametrize("wrap", [
+    lambda array: (array,),
+    lambda array: [array],
+    lambda array: [(0, [array])],
+    lambda array: _Pair(0, (array,)),
+])
+def test_nested_cuda_arrays_bypass_the_backend(
+        frontend, backend, cuda_launches, array, wrap):
+    args = (wrap(array), 1.0, 4)
+    ct.launch(None, (1,), _kernel, args, programmatic_dependent_launch=True)
+    assert cuda_launches == [
+        ((None, (1,), _kernel, args), {"programmatic_dependent_launch": True})]
+    assert _backend.backend_for(_kernel, args) is None
+    assert "compile" not in backend.calls
+
+
+def test_cuda_dispatch_handles_cyclic_containers(frontend, backend, cuda_launches):
+    values = []
+    values.extend((values, _CudaTensor()))
+    ct.launch(None, (1,), _kernel, (values, 1.0, 4))
+    assert len(cuda_launches) == 1
+    values.pop()
+    with pytest.raises(TypeError, match="only supported on CUDA"):
+        ct.launch(None, (1,), _kernel, (values, 1.0, 4))
+
+
+def test_cuda_tuning_timeout_is_allowed_with_a_backend_selected(
+        backend, monkeypatch):
+    from cuda.tile.tune import _tune
+
+    calls = []
+    monkeypatch.setattr(_tune, "_benchmark", lambda *args: 1.0)
+    monkeypatch.setattr(_tune, "benchmark_with_timeout",
+                        lambda *args: calls.append(args))
+    result = ct.tune.exhaustive_search(
+        [4], None, lambda _: (1,), _kernel,
+        lambda value: (_CudaTensor(), 1.0, value),
+        single_run_timeout_sec=1, quiet=True)
+    assert result.best.config == 4
+    assert len(calls) == 1
+
+
+def test_backend_tuning_timeout_is_rejected(backend):
+    with pytest.raises(ValueError, match="not supported by custom backends"):
+        ct.tune.exhaustive_search(
+            [4], None, lambda _: (1,), _kernel,
+            lambda value: _args(value=value),
+            single_run_timeout_sec=1, quiet=True)
+
+
+def test_backends_reject_cuda_launch_options(frontend, backend):
+    with pytest.raises(TypeError, match="only supported on CUDA"):
+        ct.launch(None, (1,), _kernel, _args(), programmatic_dependent_launch=True)
 
 
 def test_autotune_compiles_each_config_once(frontend, backend):
@@ -296,3 +458,78 @@ def test_autotune_compiles_each_config_once(frontend, backend):
 
     assert backend.calls.count("compile") == 2
     assert tuned.best_config.meta["value"] in (4, 8)
+
+
+def test_autotune_retunes_when_backend_changes(backend, monkeypatch):
+    tuned = ct.autotune(configs=[{"value": 4}, {"value": 8}], grid=(1,))(_kernel)
+    calls = []
+
+    def tune(stream, args):
+        calls.append(_backend.get_backend())
+        return len(calls) - 1, None
+
+    monkeypatch.setattr(tuned, "_tune", tune)
+    args = _args()[:2]
+    assert tuned._resolve(None, args) == 0
+    _backend.set_backend(_Backend("other"))
+    assert tuned._resolve(None, args) == 1
+    _backend.set_backend(backend)
+    assert tuned._resolve(None, args) == 0
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("callable_options", [False, True])
+def test_autotune_retunes_when_launch_options_change(backend, monkeypatch, callable_options):
+    options = (lambda meta: {"level": meta["scale"]}) if callable_options else None
+    tuned = ct.autotune(configs=[{"value": 4}, {"value": 8}],
+                        grid=(1,), options=options)(_kernel)
+    calls = []
+
+    def tune(stream, args):
+        calls.append(args)
+        return len(calls) - 1, None
+
+    monkeypatch.setattr(tuned, "_tune", tune)
+    x = _args()[0]
+    for expected, value in ((0, 1), (1, 2), (0, 1)):
+        with ct.backend_options({"num_cpu_threads": value}):
+            assert tuned._resolve(None, (x, float(value))) == expected
+    assert len(calls) == 2
+
+
+def test_autotune_retunes_for_device_index(backend, monkeypatch):
+    tuned = ct.autotune(configs=[{"value": 4}, {"value": 8}], grid=(1,))(_kernel)
+    calls = []
+    monkeypatch.setattr(tuned, "_tune",
+                        lambda stream, args: (calls.append(args) or 0, None))
+    tensor = _CudaTensor()
+    for index in (0, 1, 0):
+        tensor.device = SimpleNamespace(type="cuda", index=index)
+        tuned._resolve(None, (tensor, 1.0))
+    assert len(calls) == 2
+
+
+def test_factory_autotune_retunes_when_environment_changes(backend, monkeypatch):
+    tuned = ct.autotune(configs=[{"level": 1}, {"level": 2}])(
+        lambda x, level=1: lambda: None)
+    calls = []
+    monkeypatch.setattr(tuned, "_tune",
+                        lambda args, kwargs: (calls.append(args) or 0, None))
+    x = _args()[0]
+    for value in (1, 2, 1):
+        with ct.backend_options({"num_cpu_threads": value}):
+            tuned._resolve((x,), {})
+    assert len(calls) == 2
+
+
+def test_autotune_uses_overridden_options_not_ambient_options(backend, monkeypatch):
+    tuned = ct.autotune(configs=[{"value": 4}, {"value": 8}],
+                        grid=(1,), options={"level": 1})(_kernel)
+    calls = []
+    monkeypatch.setattr(tuned, "_tune",
+                        lambda stream, args: (calls.append(args) or 0, None))
+    args = _args()[:2]
+    for value in (1, 2):
+        with ct.backend_options({"level": value}):
+            tuned._resolve(None, args)
+    assert len(calls) == 1

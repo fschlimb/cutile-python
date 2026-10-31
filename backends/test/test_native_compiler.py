@@ -1,9 +1,11 @@
-# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -115,14 +117,7 @@ def _add_one(x, out, TILE: ct.Constant[int]):
 
 
 def _bytecode(kernel, arguments, backend):
-    from cuda.tile._compile import compile_tile, parse_bytecode_version
-
-    result = compile_tile(
-        kernel._annotated_function, (build_signature(kernel, arguments),),
-        backend.sm_arch, kernel._compiler_options, default_tile_context,
-        bytecode_version=parse_bytecode_version(backend.bytecode_version),
-        return_bytecode=True, return_cubin=False)
-    return bytes(result.bytecode), result.kernel_signatures[0]
+    return _custom.compile_bytecode(kernel, backend, build_signature(kernel, arguments))
 
 
 @pytest.fixture
@@ -177,6 +172,47 @@ def test_native_mlir_errors_include_diagnostics(native):
         pytest.skip("requires the CPU compiler")
     with pytest.raises(RuntimeError, match="parsing MLIR"):
         native.lower_cpu_mlir(b"not MLIR", cpu._lowering_pipeline())
+
+
+def _divide_with_rounding(mode):
+    @ct.kernel
+    def divide(x, y, out):
+        a = ct.load(x, index=(0,), shape=(1,))
+        b = ct.load(y, index=(0,), shape=(1,))
+        ct.store(out, index=(0,), tile=ct.truediv(a, b, rounding_mode=mode))
+
+    return divide
+
+
+@pytest.mark.parametrize("mode", [ct.RoundingMode.RZ, ct.RoundingMode.RM,
+                                 ct.RoundingMode.RP])
+@pytest.mark.parametrize("timeout", [None, 30])
+def test_native_rejects_unsupported_rounding(native, monkeypatch, mode, timeout):
+    kernel = _divide_with_rounding(mode)
+    args = tuple(np.ones(1, dtype=np.float32) for _ in range(3))
+    bytecode, signature = _bytecode(kernel, args, cpu)
+    monkeypatch.setattr(default_tile_context.config, "compiler_timeout_sec", timeout)
+    with pytest.raises(ValueError, match=f"unsupported rounding mode {mode.value}"):
+        if native.backend == "cpu":
+            cpu.compile(bytecode, signature, cpu.Options(False))
+        else:
+            _native.invoke("xpu", "compile_xpu", bytecode, (32, 1, 1), False,
+                           "workgroup", True, "bmg", False)
+
+
+def test_native_cpu_default_rounding_still_executes(native):
+    if native.backend != "cpu":
+        pytest.skip("requires the CPU compiler")
+    kernel = _divide_with_rounding(ct.RoundingMode.RN)
+    x, y = np.array([1.0], dtype=np.float32), np.array([3.0], dtype=np.float32)
+    out = np.zeros_like(x)
+    bytecode, signature = _bytecode(kernel, (x, y, out), cpu)
+    loaded = cpu.load(cpu.compile(bytecode, signature, cpu.Options(False)),
+                      signature, cpu.Options(False))
+    runtime = _custom._runtime_arguments(
+        (x, y, out), (False,) * 3, _custom._describe((False,) * 3, (x, y, out)))
+    cpu.launch(loaded, None, (1,), runtime)
+    np.testing.assert_array_equal(out, x / y)
 
 
 def test_cpu_compiles_in_forked_child_after_parent_compiled(native):
@@ -322,3 +358,59 @@ def test_xpu_compiles_concurrently(native, monkeypatch):
     with ThreadPoolExecutor(max_workers=4) as pool:
         binaries = list(pool.map(lambda _: xpu.compile(bytecode, signature, options), range(4)))
     assert all(binary.startswith(b"\x7fELF") for binary in binaries)
+
+
+@ct.kernel
+def _unused_array(unused, count: int, out):
+    ct.store(out, index=(0,), tile=ct.full((32,), count, ct.float32))
+
+
+@ct.kernel
+def _array_shape_only(unused, count: int, out):
+    ct.store(out, index=(0,), tile=ct.full((32,), unused.shape[0] + count, ct.float32))
+
+
+def _xpu_argument_sizes(binary):
+    return {int(index): int(size) for size, index in re.findall(
+        rb"size:\s+(\d+)\s+arg_index:\s+(\d+)", binary)}
+
+
+@pytest.mark.parametrize("shape", [(), (13,), (3, 5)])
+@pytest.mark.parametrize("shape_only", [False, True])
+def test_xpu_unused_arrays_keep_ranked_abi(native, capfd, shape, shape_only):
+    if native.backend != "xpu":
+        pytest.skip("requires the XPU compiler")
+    if shape_only and not shape:
+        pytest.skip("rank-zero arrays have no shape axis")
+    from cuda.tile._backend import xpu
+
+    kernel = _array_shape_only if shape_only else _unused_array
+    args = (np.zeros(shape, dtype=np.float32), 7, np.zeros(32, dtype=np.float32))
+    bytecode, _ = _bytecode(kernel, args, xpu)
+    binary = native.compile_xpu(bytecode, (32, 1, 1), False, "workgroup", True,
+                                "bmg", True, (len(shape), -1, 1))
+    assert binary.startswith(b"\x7fELF")
+    lowered = capfd.readouterr().err
+    assert "memref<*" not in lowered
+    signature = next(line for line in lowered.splitlines() if "gpu.func @" in line)
+    assert signature.count("%arg") == 3
+    assert signature.count("memref<") == 2
+    expected = [8] * (3 + 2 * len(shape)) + [4] + [8] * 5
+    assert _xpu_argument_sizes(binary) == dict(enumerate(expected))
+
+
+@ct.kernel
+def _xpu_scalars(out, flag: bool, scale: float, count: int, wide: ct.ScalarInt64):
+    value = scale + count if flag else -scale
+    ct.store(out, index=(0,), tile=ct.full((32,), value, ct.float32))
+
+
+def test_xpu_scalar_sizes_match_the_native_abi(native):
+    if native.backend != "xpu":
+        pytest.skip("requires the XPU compiler")
+    from cuda.tile._backend import xpu
+
+    args = (np.zeros(32, dtype=np.float32), True, 1.5, -7, 1 << 40)
+    bytecode, signature = _bytecode(_xpu_scalars, args, xpu)
+    binary = xpu.compile(bytecode, signature, xpu.normalize_options({"block_threads": 32}))
+    assert _xpu_argument_sizes(binary) == dict(enumerate([8] * 5 + [1, 4, 4, 8]))

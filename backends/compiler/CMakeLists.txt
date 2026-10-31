@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 
 if(NOT TARGET TileIRToMLIR)
@@ -8,7 +9,7 @@ endif()
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(nanobind CONFIG REQUIRED)
 
-nanobind_add_module(_compiler compiler.cpp)
+nanobind_add_module(_compiler FREE_THREADED compiler.cpp)
 target_include_directories(_compiler SYSTEM PRIVATE
     "${LLVM_MAIN_SRC_DIR}/../mlir/include"
     "${LLVM_BINARY_DIR}/tools/mlir/include")

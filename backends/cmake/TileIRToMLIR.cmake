@@ -2,8 +2,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-set(CUTILE_XPU_MONOLITHIC_INSTALL_DIR "" CACHE PATH
-    "Existing LLVM/MLIR, TileIRToMLIR and cuTile native compiler installation")
+set(CUTILE_TOOLCHAIN_DIR "" CACHE PATH
+    "Existing native compiler installation for CUTILE_BUILD_VARIANT; skips building LLVM")
 
 execute_process(
     COMMAND "${Python_EXECUTABLE}" -c
@@ -12,30 +12,20 @@ execute_process(
     COMMAND_ERROR_IS_FATAL ANY)
 set(_compiler_name "_compiler${_compiler_suffix}")
 
-set(_tileir_to_mlir_dir "${CMAKE_SOURCE_DIR}/tileir-to-mlir")
+set(_tileir_to_mlir_dir "${CUTILE_TILEIR_TO_MLIR_DIR}")
 if(NOT EXISTS "${_tileir_to_mlir_dir}/CMakeLists.txt")
     message(FATAL_ERROR
         "TileIRToMLIR sources are missing. Initialize the tileir-to-mlir submodule.")
 endif()
 
-if(CUTILE_BUILD_VARIANT STREQUAL "xpu" AND CUTILE_XPU_MONOLITHIC_INSTALL_DIR)
-    set(CUTILE_COMPILER_PATH
-        "${CUTILE_XPU_MONOLITHIC_INSTALL_DIR}/lib/${_compiler_name}")
-    set(CUTILE_LLVM_LICENSE_PATH
-        "${CUTILE_XPU_MONOLITHIC_INSTALL_DIR}/share/cutile/llvm/LICENSE.TXT")
-    find_library(CUTILE_XPU_RUNTIME_PATH
-        NAMES mlir_levelzero_runtime
-        PATHS "${CUTILE_XPU_MONOLITHIC_INSTALL_DIR}/lib"
-              "${CUTILE_XPU_MONOLITHIC_INSTALL_DIR}/lib64"
-        NO_DEFAULT_PATH REQUIRED)
-    if(NOT EXISTS "${CUTILE_COMPILER_PATH}")
-        message(FATAL_ERROR
-            "CUTILE_XPU_MONOLITHIC_INSTALL_DIR must contain lib/${_compiler_name}")
-    endif()
-    if(NOT EXISTS "${CUTILE_LLVM_LICENSE_PATH}")
-        message(FATAL_ERROR
-            "CUTILE_XPU_MONOLITHIC_INSTALL_DIR must contain share/cutile/llvm/LICENSE.TXT")
-    endif()
+if(CUTILE_TOOLCHAIN_DIR)
+    set(CUTILE_COMPILER_PATH "${CUTILE_TOOLCHAIN_DIR}/lib/${_compiler_name}")
+    set(CUTILE_LLVM_LICENSE_PATH "${CUTILE_TOOLCHAIN_DIR}/share/cutile/llvm/LICENSE.TXT")
+    foreach(_path IN ITEMS CUTILE_COMPILER_PATH CUTILE_LLVM_LICENSE_PATH)
+        if(NOT EXISTS "${${_path}}")
+            message(FATAL_ERROR "CUTILE_TOOLCHAIN_DIR must contain ${${_path}}")
+        endif()
+    endforeach()
     return()
 endif()
 
@@ -70,20 +60,6 @@ if(CUTILE_BUILD_VARIANT STREQUAL "xpu")
     find_path(OCLOC_INCLUDE_DIR NAMES ocloc_api.h
         HINTS ${OCLOC_PACKAGE_DIR} ENV CPATH ENV CPLUS_INCLUDE_PATH
         PATH_SUFFIXES include REQUIRED)
-    find_path(LevelZeroRuntime_INCLUDE_DIR
-        NAMES level_zero/ze_api.h
-        HINTS ${LEVEL_ZERO_DIR} ENV LEVEL_ZERO_DIR
-              ENV CPATH ENV C_INCLUDE_PATH ENV CPLUS_INCLUDE_PATH
-        PATH_SUFFIXES include)
-    find_library(LevelZeroRuntime_LIBRARY
-        NAMES ze_loader
-        HINTS ${LEVEL_ZERO_DIR} ENV LEVEL_ZERO_DIR
-              ENV LIBRARY_PATH ENV LD_LIBRARY_PATH
-        PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
-    if(NOT LevelZeroRuntime_INCLUDE_DIR OR NOT LevelZeroRuntime_LIBRARY)
-        message(FATAL_ERROR
-            "Level Zero was not found. Source the Intel environment scripts or set LEVEL_ZERO_DIR.")
-    endif()
 endif()
 
 include(ExternalProject)
@@ -92,8 +68,6 @@ set(_required_llvm_revisions_file
 file(CONFIGURE OUTPUT "${_required_llvm_revisions_file}"
     CONTENT "tileir=${_tileir_required_llvm_revision}\noverride=${_cutile_llvm_override}\n" @ONLY)
 
-set(CUTILE_XPU_RUNTIME_PATH
-    "${CUTILE_LLVM_BINARY_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}mlir_levelzero_runtime${CMAKE_SHARED_LIBRARY_SUFFIX}")
 set(CUTILE_COMPILER_PATH "${CUTILE_LLVM_BINARY_DIR}/lib/${_compiler_name}")
 
 set(_cutile_checkout_script "${CMAKE_CURRENT_LIST_DIR}/CheckoutLLVM.cmake")
@@ -117,10 +91,8 @@ else()
     set(_cutile_llvm_projects mlir)
     set(_cutile_llvm_experimental_targets SPIRV)
     set(_cutile_disable_ocloc OFF)
-    set(_cutile_llvm_build_targets
-        mlir_levelzero_runtime _compiler)
-    set(_cutile_llvm_byproducts
-        "${CUTILE_XPU_RUNTIME_PATH}" "${CUTILE_COMPILER_PATH}")
+    set(_cutile_llvm_build_targets _compiler)
+    set(_cutile_llvm_byproducts "${CUTILE_COMPILER_PATH}")
 endif()
 
 set(_cutile_llvm_cmake_args
@@ -131,6 +103,8 @@ set(_cutile_llvm_cmake_args
     "-DLLVM_ENABLE_PROJECTS:STRING=${_cutile_llvm_projects}"
     "-DLLVM_EXTERNAL_PROJECTS:STRING=TileIRToMLIR|cuTileCompiler"
     "-DLLVM_EXTERNAL_TILEIRTOMLIR_SOURCE_DIR:PATH=${_tileir_to_mlir_dir}"
+    # Explicit, so that a shared LLVM tree never keeps another checkout's path.
+    "-DTILEIR_TO_MLIR_CUDA_TILE_SOURCE_DIR:PATH=${_tileir_to_mlir_dir}/third_party/cuda-tile"
     "-DLLVM_EXTERNAL_CUTILECOMPILER_SOURCE_DIR:PATH=${CMAKE_CURRENT_SOURCE_DIR}/compiler"
     "-DCUTILE_BUILD_VARIANT:STRING=${CUTILE_BUILD_VARIANT}"
     "-DUSE_LLVM_REVISION:STRING=${_cutile_llvm_override}"
@@ -151,7 +125,7 @@ set(_cutile_llvm_cmake_args
     -DLLVM_ENABLE_LIBXML2:STRING=OFF
     "-DCMAKE_DISABLE_FIND_PACKAGE_ocloc:BOOL=${_cutile_disable_ocloc}"
     # Clear results that the shared LLVM cache would otherwise retain from
-    # another variant; the XPU arguments below set its project include again.
+    # another variant.
     -UOCLOC_FOUND
     -UCMAKE_PROJECT_INCLUDE
     -DMLIR_INCLUDE_TESTS:BOOL=OFF
@@ -163,14 +137,8 @@ set(_cutile_llvm_cmake_args
     "-Dnanobind_DIR:PATH=${nanobind_DIR}")
 if(CUTILE_BUILD_VARIANT STREQUAL "xpu")
     list(APPEND _cutile_llvm_cmake_args
-        -DMLIR_ENABLE_LEVELZERO_RUNNER:BOOL=ON
         "-DOCLOC_INCLUDE_DIR:PATH=${OCLOC_INCLUDE_DIR}"
-        "-DOCLOC_PACKAGE_DIR:PATH=${OCLOC_PACKAGE_DIR}"
-        "-DCMAKE_PROJECT_INCLUDE:FILEPATH=${CMAKE_CURRENT_LIST_DIR}/ExplicitLevelZeroInclude.cmake"
-        "-DCUTILE_LEVEL_ZERO_INCLUDE_DIR:PATH=${LevelZeroRuntime_INCLUDE_DIR}"
-        "-DLevelZeroRuntime_INCLUDE_DIR:PATH=${LevelZeroRuntime_INCLUDE_DIR}"
-        "-DLevelZeroRuntime_INCLUDE_DIRS:STRING=${LevelZeroRuntime_INCLUDE_DIR}"
-        "-DLevelZeroRuntime_LIBRARY:FILEPATH=${LevelZeroRuntime_LIBRARY}")
+        "-DOCLOC_PACKAGE_DIR:PATH=${OCLOC_PACKAGE_DIR}")
 endif()
 
 set(_cutile_llvm_build_script "${CMAKE_BINARY_DIR}/tileir-toolchain/BuildLLVM.cmake")

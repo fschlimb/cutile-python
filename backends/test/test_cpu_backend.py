@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 
 import ctypes
@@ -11,6 +12,7 @@ import struct
 import subprocess
 import sys
 from types import SimpleNamespace
+from typing import Annotated
 
 import cuda.tile as ct
 from cuda.tile import _backend
@@ -146,22 +148,21 @@ def test_backend_package_contains_lowering_schedule():
         assert f"transform.named_sequence @{entry_point}(" in schedule.read_text()
 
 
-@pytest.mark.parametrize("machine, flags, entry_point", [
-    ("aarch64", "fp asimd", "__transform_nano"),
-    ("x86_64", "avx512f avx512_bf16", "__transform_nano_x86"),
-    ("x86_64", "amx_tile amx_bf16", "__transform_nano_x86"),
-    ("x86_64", "avx512f amx_tile amx_bf16 amx_int8", "__transform_nano_amx"),
+@pytest.mark.parametrize("machine, amx, entry_point", [
+    ("aarch64", False, "__transform_nano"),
+    ("x86_64", False, "__transform_nano_x86"),
+    ("x86_64", True, "__transform_nano_amx"),
 ])
-def test_amx_lowering_requires_host_support(monkeypatch, machine, flags, entry_point):
+def test_amx_lowering_requires_enabled_amx(monkeypatch, machine, amx, entry_point):
     monkeypatch.setattr(cpu.platform, "machine", lambda: machine)
-    monkeypatch.setattr(cpu, "_host_cpu", lambda: {"flags": flags})
+    monkeypatch.setattr(cpu, "_amx_enabled", lambda: amx)
 
     assert cpu._transform_entry_point() == entry_point
     assert f"transform-interpreter{{entry-point={entry_point}}}" in cpu._lowering_pipeline()
 
 
 def test_lowering_pipeline_preserves_additional_pass_order():
-    pipeline = cpu._lowering_pipeline()
+    pipeline = cpu._lowering_pipeline("__transform_nano")
     for name in (
         "transform-preload-library",
         "transform-interpreter{entry-point=__transform_nano",
@@ -177,7 +178,7 @@ def test_lowering_pipeline_preserves_additional_pass_order():
         "transform-preload-library", "transform-interpreter",
         "fold-memref-alias-ops", "math-expand-ops", "convert-to-llvm",
     ):
-        assert cpu._lowering_pipeline().count(name) == 1
+        assert cpu._lowering_pipeline("__transform_nano").count(name) == 1
 
 
 def test_backend_registration_accepts_builtin_cpu():
@@ -194,6 +195,7 @@ def test_compiler_identity_tracks_toolchain_cpu_and_compile_options(monkeypatch)
     monkeypatch.setattr(
         cpu, "file_fingerprint", lambda path: f"fingerprint:{path}")
     monkeypatch.setattr(cpu, "_host_cpu", lambda: {"flags": "avx2"})
+    monkeypatch.setattr(cpu, "_transform_entry_point", lambda: "__transform_nano_x86")
 
     first = cpu.compiler_identity(cpu.normalize_options({"num_cpu_threads": 1}))
     second = cpu.compiler_identity(cpu.normalize_options({"num_cpu_threads": 8}))
@@ -207,6 +209,10 @@ def test_compiler_identity_tracks_toolchain_cpu_and_compile_options(monkeypatch)
     monkeypatch.setattr(cpu, "_host_cpu", lambda: {"flags": "avx2 avx512f"})
     assert first != cpu.compiler_identity(cpu.Options(False))
     monkeypatch.setattr(cpu, "_host_cpu", lambda: {"flags": "avx2"})
+    # Whether AMX is enabled selects the schedule, so it is part of the identity.
+    monkeypatch.setattr(cpu, "_transform_entry_point", lambda: "__transform_nano_amx")
+    assert first != cpu.compiler_identity(cpu.Options(False))
+    monkeypatch.setattr(cpu, "_transform_entry_point", lambda: "__transform_nano_x86")
     monkeypatch.setattr(
         cpu, "file_fingerprint",
         lambda path: (f"rebuilt:{path}" if path == cpu._TRANSFORM_SCHEDULE
@@ -230,6 +236,7 @@ def test_compiler_identity_disables_disk_cache_for_missing_native_file(monkeypat
 
 def test_compile_calls_native_pipeline_and_cleans_temporary_files(monkeypatch):
     observed = {}
+    monkeypatch.setattr(cpu, "_transform_entry_point", lambda: "__transform_nano")
     monkeypatch.setenv("CUTILE_CPU_DUMP_MLIR", "/dump.mlir")
     monkeypatch.setenv("MLIR_ENABLE_DUMP", "1")
 
@@ -398,6 +405,7 @@ module {
 )
 def test_native_import_enables_amx_tile_data():
     pytest.importorskip("cuda.tile._backend.cpu._cpu")
+    assert cpu._amx_enabled()
     subprocess.run([sys.executable, "-c", """
 import ctypes
 import torch
@@ -464,7 +472,7 @@ def _grid_ids(out):
 @pytest.mark.parametrize("grid", [(1,), (4,), (3, 2), (3, 2, 2), (0, 2, 2)])
 @pytest.mark.parametrize("threads", [1, 3])
 def test_native_grid_ids_and_sizes(grid, threads):
-    shape = _backend._custom.normalize_dims(grid)
+    shape = _backend._util.normalize_dims(grid)
     out = np.full(shape, -1, dtype=np.int32)
     with ct.backend_options({"num_cpu_threads": threads}):
         ct.launch(None, grid, _grid_ids, (out,))
@@ -485,6 +493,19 @@ def test_native_scalars(flag):
     out = torch.empty(1, dtype=torch.float32)
     ct.launch(None, (1,), _scalar_store, (out, flag, 1.5, -7))
     assert out.item() == (-10.5 if flag else -1.5)
+
+
+@ct.kernel
+def _constant_store(out, value: ct.Constant[float]):
+    ct.store(out, index=(0,), tile=ct.full((1,), value, ct.float32))
+
+
+@pytest.mark.usefixtures("native_cpu")
+def test_native_constant_cache_preserves_signed_zero():
+    out = np.zeros(1, dtype=np.float32)
+    for value in (0.0, -0.0, 0.0):
+        ct.launch(None, (1,), _constant_store, (out, value))
+        assert np.signbit(out[0]) == np.signbit(value)
 
 
 @ct.kernel
@@ -522,7 +543,7 @@ def test_native_matmul(dtype):
 
 @pytest.mark.usefixtures("native_cpu")
 @pytest.mark.skipif(
-    "amx_bf16" not in cpu._host_cpu().get("flags", "").split(),
+    sys.platform != "linux" or "amx_bf16" not in cpu._host_cpu().get("flags", "").split(),
     reason="requires AMX BF16 support",
 )
 @pytest.mark.parametrize("blocking_factor_k", [1, 2, 4])
@@ -577,9 +598,6 @@ def test_only_the_amx_schedule_emits_amx(monkeypatch, tmp_path):
 @pytest.mark.usefixtures("native_cpu")
 @pytest.mark.parametrize("scaling_block_size", [16, 32])
 def test_swizzled_scale_tile_shape_is_independent_of_scaling_block_size(scaling_block_size):
-    from cuda.tile._cext import default_tile_context
-    from cuda.tile._compile import compile_tile, parse_bytecode_version
-
     path = Path(__file__).resolve().parents[2] / "samples" / "cpu" / "BlockScaledMatMul-cpu.py"
     spec = importlib.util.spec_from_file_location("cpu_sample_block_scaled_matmul", path)
     sample = importlib.util.module_from_spec(spec)
@@ -590,12 +608,8 @@ def test_swizzled_scale_tile_shape_is_independent_of_scaling_block_size(scaling_
             torch.ones((k, 128), dtype=torch.bfloat16), scales,
             torch.empty((128, 128)), 128, 128, k, scaling_block_size)
     kernel = sample.block_scaled_matmul_kernel
-    result = compile_tile(
-        kernel._annotated_function, (build_signature(kernel, args),), cpu.sm_arch,
-        kernel._compiler_options, default_tile_context,
-        bytecode_version=parse_bytecode_version(cpu.bytecode_version),
-        return_bytecode=True, return_cubin=False)
-    assert result.bytecode
+    bytecode, _ = _custom.compile_bytecode(kernel, cpu, build_signature(kernel, args))
+    assert bytecode
 
 
 @ct.kernel
@@ -612,6 +626,29 @@ def test_native_int64_scalar_and_array_metadata():
 
 
 @ct.kernel
+def _copy_static_shape(x: Annotated[ct.Array, ct.ArrayAnnotation(static_shape_dims=(0,))],
+                       y, size: ConstInt):
+    ct.store(y, index=(0,), tile=ct.load(x, index=(0,), shape=(size,)))
+
+
+@ct.kernel
+def _copy_matrix(x, y, rows: ConstInt, cols: ConstInt):
+    ct.store(y, index=(0, 0), tile=ct.load(x, index=(0, 0), shape=(rows, cols)))
+
+
+@pytest.mark.usefixtures("native_cpu")
+def test_native_static_and_size_one_shapes():
+    x = np.arange(16, dtype=np.float32)
+    y = np.zeros_like(x)
+    ct.launch(None, (1,), _copy_static_shape, (x, y, 16))
+    np.testing.assert_array_equal(y, x)
+
+    x, y = x.reshape(1, 16), np.zeros((1, 16), dtype=np.float32)
+    ct.launch(None, (1,), _copy_matrix, (x, y, 1, 16))
+    np.testing.assert_array_equal(y, x)
+
+
+@ct.kernel
 def _empty_kernel():
     pass
 
@@ -624,20 +661,12 @@ def test_native_kernel_without_arguments():
 
 @pytest.mark.usefixtures("native_cpu")
 def test_existing_flat_cpu_abi_still_executes(monkeypatch, tmp_path):
-    from cuda.tile._cext import default_tile_context
-    from cuda.tile._compile import compile_tile, parse_bytecode_version
-
     args = (np.arange(64, dtype=np.float32), np.ones(64, dtype=np.float32),
             np.zeros(64, dtype=np.float32), 16)
-    signature = build_signature(_vector_add, args)
-    result = compile_tile(
-        _vector_add._annotated_function, (signature,), cpu.sm_arch,
-        _vector_add._compiler_options, default_tile_context,
-        bytecode_version=parse_bytecode_version(cpu.bytecode_version),
-        return_bytecode=True, return_cubin=False)
-    [signature] = result.kernel_signatures
+    bytecode, signature = _custom.compile_bytecode(
+        _vector_add, cpu, build_signature(_vector_add, args))
     binary = cpu.native_compiler("cpu").compile_cpu(
-        bytes(result.bytecode), cpu._lowering_pipeline(), False,
+        bytecode, cpu._lowering_pipeline(), False,
         str(tmp_path), "", False, False)
     path = tmp_path / "flat.so"
     path.write_bytes(binary)

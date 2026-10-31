@@ -7,35 +7,65 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 import gc
 import importlib
 import logging
 import threading
 import time
 from types import MappingProxyType
-from typing import Any, Hashable
+from typing import Any, Hashable, Mapping, Protocol
 
 from cuda.tile._cext import _synchronize_context, default_tile_context
 from cuda.tile._cext import launch as _cext_launch
 from cuda.tile.compilation import ConstantConstraint, KernelSignature, mangle_kernel_name
 from cutile_cache._cache import cache_key, cache_lookup, cache_store, evict_lru
 
-from ._signature import ArrayArgument, array_metadata, build_signature, constant_parameters
+from ._signature import (
+    ArrayArgument, array_metadata, build_signature, constant_key, constant_parameters,
+)
 
 logger = logging.getLogger(__name__)
 
-# Attributes every backend provides; see the package docstring.
-_BACKEND_ATTRIBUTES = (
-    "sm_arch", "bytecode_version", "normalize_options", "compiler_identity",
-    "compile", "load", "launch", "synchronize",
-)
+
+class Backend(Protocol):
+    """A backend module or object, as accepted by :func:`set_backend`."""
+
+    #: Target name, e.g. ``"cpu"``; part of the disk cache key.
+    name: str
+    #: TileIR bytecode version that ``compile`` reads, e.g. ``"13.3"``.
+    bytecode_version: str
+
+    def normalize_options(self, options: Mapping[str, Any]) -> Hashable:
+        """Validate the options of a :func:`backend_options` block, rejecting
+        unknown keys, into a value with a stable ``repr`` that covers everything
+        affecting ``compile``."""
+
+    def compiler_identity(self, options: Hashable) -> str | None:
+        """Identify everything besides the bytecode that affects ``compile``;
+        ``None`` disables the disk cache."""
+
+    def compile(self, bytecode: bytes, signature: KernelSignature,
+                options: Hashable) -> bytes:
+        """Compile TileIR bytecode into a binary."""
+
+    def load(self, binary: bytes, signature: KernelSignature, options: Hashable) -> Any:
+        """Prepare a binary for launching; called once per binary."""
+
+    def launch(self, loaded: Any, stream: Any, grid: Any, args: tuple) -> None:
+        """Run ``load``'s result synchronously. ``args`` holds the kernel arguments
+        without compile-time constants, with each array as an :class:`ArrayArgument`."""
+
+    def synchronize(self, stream: Any) -> None:
+        """Wait for work queued on ``stream``."""
+
+
+_BACKEND_ATTRIBUTES = (*Backend.__annotations__,
+                       *(name for name, value in vars(Backend).items()
+                         if callable(value) and not name.startswith("_")))
 
 # Per kernel, at most this many argument layouts and binaries stay cached.
 _CACHE_LIMIT = 256
-
-# Base address alignments above this many bytes (log2) share a cache entry.
-_MAX_TRACKED_ALIGNMENT_LOG2 = 12
 
 _NO_OPTIONS = MappingProxyType({})
 
@@ -63,11 +93,15 @@ def _import_backend_module(module: str):
 
 
 def set_backend(backend) -> None:
-    """Route :func:`cuda.tile.launch` to a non-CUDA backend.
+    """Select the backend that runs :func:`cuda.tile.launch` for non-CUDA arrays.
+
+    The selection is process-wide. Launches with an array argument on a CUDA
+    device still run on CUDA, so other users of cuTile in the process are not
+    affected. :func:`backend_options` blocks apply to the current thread.
 
     Args:
-        backend: A backend module (or object) or its name. Short names such
-            as ``"cpu"`` or ``"xpu"`` select the built-in backends. ``None``
+        backend: A :class:`Backend` module (or object) or its name. Short names
+            such as ``"cpu"`` or ``"xpu"`` select the built-in backends. ``None``
             restores the default CUDA path.
     """
     global _backend
@@ -142,16 +176,21 @@ class CompiledKernel:
 
 
 class _KernelCache:
-    __slots__ = ("constants", "launches", "binaries", "lock")
+    __slots__ = ("constants", "launches", "binaries", "lock", "compile_lock")
 
     def __init__(self, constants: tuple[bool, ...]):
         # Whether each kernel parameter is a compile-time constant.
         self.constants = constants
         # (backend, options, builder, argument layouts) -> CompiledKernel.
         self.launches = OrderedDict()
-        # (backend, options, mangled name, symbol) -> CompiledKernel.
+        # (backend, options, mangled name, symbol) -> CompiledKernel; only
+        # accessed under compile_lock.
         self.binaries = OrderedDict()
+        # Guards `launches`; held only briefly so that cache hits never wait
+        # for a compile.
         self.lock = threading.Lock()
+        # Serializes the compiles of this kernel.
+        self.compile_lock = threading.Lock()
 
 
 def _kernel_cache(kernel) -> _KernelCache:
@@ -165,10 +204,7 @@ def _kernel_cache(kernel) -> _KernelCache:
 def _lru_get(cache: OrderedDict, key):
     value = cache.get(key)
     if value is not None:
-        try:
-            cache.move_to_end(key)
-        except KeyError:  # evicted by another thread
-            pass
+        cache.move_to_end(key)
     return value
 
 
@@ -198,34 +234,64 @@ def _describe(constants, args) -> tuple:
 def _argument_key(value, constant: bool, array: ArrayArgument | None):
     """Everything about ``value`` that a signature builder may depend on."""
     if constant:
-        return type(value), value
+        return constant_key(value)
     if array is None:
         return type(value)
     pointer = array.pointer
-    alignment = ((pointer & -pointer).bit_length() - 1 if pointer
-                 else _MAX_TRACKED_ALIGNMENT_LOG2)
-    return (array.dtype, array.shape, array.strides,
-            min(alignment, _MAX_TRACKED_ALIGNMENT_LOG2))
+    return array.dtype, array.shape, array.strides, pointer & -pointer
 
 
 def _runtime_arguments(args, constants, arrays) -> tuple:
-    """The arguments a backend's ``launch`` receives; see the package docstring."""
+    """The arguments a backend's ``launch`` receives; see :class:`Backend`."""
     return tuple(value if array is None else array
                  for value, constant, array in zip(args, constants, arrays)
                  if not constant)
 
 
+def _contains_cuda(value, seen: set[int]) -> bool:
+    if hasattr(value, "__cuda_array_interface__"):
+        return True
+    if callable(getattr(value, "data_ptr", None)):
+        device = getattr(value, "device", None)
+        return getattr(device, "type", device) == "cuda"
+    if isinstance(value, (tuple, list)):
+        children = value
+    elif is_dataclass(value) and not isinstance(value, type):
+        children = (getattr(value, field.name) for field in fields(value))
+    else:
+        return False
+    if id(value) in seen:
+        return False
+    seen.add(id(value))
+    return any(_contains_cuda(child, seen) for child in children)
+
+
+def _on_cuda(args, arrays) -> bool:
+    """Whether any argument, including an aggregate, contains a CUDA array."""
+    seen = set()
+    return any(_contains_cuda(value, seen) if array is None
+               else array.device == "cuda"
+               for value, array in zip(args, arrays))
+
+
 def _compile_for_launch(backend, kernel, cache, args, arrays, signature_builder):
     options = _normalized_options(backend)
     key = (backend, options, signature_builder,
-           tuple(map(_argument_key, args, cache.constants, arrays)))
-    compiled = _lru_get(cache.launches, key)
-    if compiled is None:
+           tuple(map(_argument_key, args, cache.constants, arrays)),
+           # A custom builder may assume divisibility by a non-power of two.
+           tuple(array.pointer if array is not None else None for array in arrays)
+           if signature_builder is not build_signature else None)
+    with cache.lock:
+        compiled = _lru_get(cache.launches, key)
+    if compiled is not None:
+        return compiled
+    with cache.compile_lock:
         with cache.lock:
-            compiled = cache.launches.get(key)
-            if compiled is None:
-                compiled = _compile(kernel, cache, backend,
-                                    signature_builder(kernel, args), options)
+            compiled = _lru_get(cache.launches, key)
+        if compiled is None:
+            compiled = _compile(kernel, cache, backend,
+                                signature_builder(kernel, args), options)
+            with cache.lock:
                 _lru_put(cache.launches, key, compiled)
     return compiled
 
@@ -235,6 +301,17 @@ def _active_backend():
     if backend is None:
         raise RuntimeError("no backend is active; see cuda.tile.set_backend()")
     return backend
+
+
+def backend_for(kernel, kernel_args):
+    """The backend :func:`launch` runs ``kernel`` on for ``kernel_args``, or
+    ``None`` for CUDA."""
+    backend = _backend
+    if backend is None:
+        return None
+    args = tuple(kernel_args)
+    return None if _on_cuda(args, _describe(_kernel_cache(kernel).constants, args)) \
+        else backend
 
 
 def compile_for_launch(kernel, args, *, signature_builder=build_signature):
@@ -267,18 +344,23 @@ def _compile(kernel, cache, backend, signature, options):
     return compiled
 
 
-def _compile_binary(kernel, backend, signature, options):
+def compile_bytecode(kernel, backend, signature) -> tuple[bytes, KernelSignature]:
+    """Compile ``kernel`` to architecture-independent TileIR bytecode for ``backend``."""
     from cuda.tile._compile import compile_tile, parse_bytecode_version
 
-    context = default_tile_context
     result = compile_tile(
-        kernel._annotated_function, (signature,), backend.sm_arch,
-        kernel._compiler_options, context,
+        kernel._annotated_function, (signature,), None,
+        kernel._compiler_options, default_tile_context,
         bytecode_version=parse_bytecode_version(backend.bytecode_version),
         return_bytecode=True, return_cubin=False)
     [signature] = result.kernel_signatures
-    bytecode = bytes(result.bytecode)
+    return bytes(result.bytecode), signature
 
+
+def _compile_binary(kernel, backend, signature, options):
+    bytecode, signature = compile_bytecode(kernel, backend, signature)
+
+    context = default_tile_context
     cache_dir = context.config.cache_dir
     disk_key = None
     if cache_dir is not None:
@@ -286,9 +368,8 @@ def _compile_binary(kernel, backend, signature, options):
         if identity is None:
             logger.warning("disk cache disabled: backend compiler identity is unknown")
         else:
-            opt_level = kernel._compiler_options.opt_level_for_target(backend.sm_arch)
-            disk_key = cache_key(f"custom-backend-v2:{identity}", backend.sm_arch,
-                                 opt_level, bytecode)
+            # Backends ignore the kernel's opt_level, so it is not part of the key.
+            disk_key = cache_key(f"cutile-backend-v3:{identity}", backend.name, 0, bytecode)
             binary = cache_lookup(cache_dir, disk_key)
             if binary is not None:
                 return binary, signature
@@ -302,24 +383,33 @@ def _compile_binary(kernel, backend, signature, options):
     return binary, signature
 
 
-def launch(stream, grid, kernel, kernel_args, /):
+def launch(stream, grid, kernel, kernel_args, /, **options):
     """Launch a cuTile kernel.
 
-    Runs on the backend selected with :func:`cuda.tile.set_backend`, if any,
-    and on CUDA otherwise.
+    Runs on CUDA, or on the backend selected with :func:`cuda.tile.set_backend`
+    if no array argument is on a CUDA device.
 
     Args:
         stream: The stream to execute the |kernel| on.
         grid: Tuple of up to 3 grid dimensions to execute the |kernel| over.
         kernel: The |kernel| to execute.
         kernel_args: Positional arguments to pass to the kernel.
+        **options: CUDA launch options, such as ``programmatic_dependent_launch``.
     """
     backend = _backend
     if backend is None:
+        # Calls without options avoid the slower keyword-argument call.
+        if options:
+            return _cext_launch(stream, grid, kernel, kernel_args, **options)
         return _cext_launch(stream, grid, kernel, kernel_args)
     args = tuple(kernel_args)
     cache = _kernel_cache(kernel)
     arrays = _describe(cache.constants, args)
+    if _on_cuda(args, arrays):
+        return _cext_launch(stream, grid, kernel, args, **options)
+    if options:
+        raise TypeError(f"launch options {', '.join(map(repr, options))} are only "
+                        f"supported on CUDA")
     compiled = _compile_for_launch(
         backend, kernel, cache, args, arrays, build_signature)
     backend.launch(compiled.loaded, stream, grid,
@@ -365,41 +455,3 @@ def benchmark(stream, grid, kernel, args) -> float:
     compiled = compile_for_launch(kernel, args)
     return benchmark_callable(
         stream, launch_compiled, (stream, grid, compiled, args))
-
-
-def synchronize_stream(stream) -> None:
-    """Wait for a framework stream; ``None`` and ``0`` stand for no stream."""
-    if stream is None or (isinstance(stream, int) and stream == 0):
-        return
-    synchronize = getattr(stream, "synchronize", None)
-    if synchronize is None:
-        raise TypeError("stream must be None, 0, or provide synchronize()")
-    synchronize()
-
-
-def normalize_dims(value) -> tuple[int, int, int]:
-    """Normalize one to three launch dimensions to a three-tuple."""
-
-    values = (value,) if isinstance(value, int) else tuple(value)
-    if not 1 <= len(values) <= 3:
-        raise ValueError("launch dimensions must have length 1 to 3")
-    return values + (1,) * (3 - len(values))
-
-
-def check_options(backend: str, options, known) -> None:
-    """Reject option keys the backend does not know, e.g. misspelled ones."""
-    unknown = sorted(set(options) - set(known))
-    if unknown:
-        raise ValueError(
-            f"{backend} backend: unknown options {', '.join(map(repr, unknown))}; "
-            f"expected any of {', '.join(sorted(known))}")
-
-
-def bool_option(backend: str, options, key: str, default: bool) -> bool:
-    """Read a boolean option, rejecting look-alikes such as ``"false"``."""
-
-    value = options.get(key, default)
-    if not isinstance(value, bool):
-        raise TypeError(
-            f"{backend} backend: option {key!r} must be a bool, got {value!r}")
-    return value

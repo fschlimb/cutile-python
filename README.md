@@ -12,7 +12,7 @@ Non-CUDA Backends
 -----------------
 
 Experimental CPU and Intel XPU backends are described in
-[src/cuda/tile/_backend/README.md](src/cuda/tile/_backend/README.md).
+[backends/README.md](backends/README.md).
 
 Example
 -------
