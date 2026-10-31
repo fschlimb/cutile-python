@@ -177,6 +177,7 @@ from cuda.tile._stub import (
 from cuda.tile._context import compiler_timeout
 
 from cuda.tile import tune
+from cuda.tile.tune import autotune
 
 from cuda.tile._backend import launch, set_backend, clear_backend, backend_options
 
@@ -357,6 +358,7 @@ __all__ = [
     "compiler_timeout",
 
     "tune",
+    "autotune",
 
     "function",
     "kernel",

@@ -283,3 +283,16 @@ def test_launch_without_backend_uses_cuda(monkeypatch):
     assert len(launches) == 1
     with pytest.raises(RuntimeError, match="no backend"):
         _backend.compile_for_launch(_kernel, _args())
+
+
+def test_autotune_compiles_each_config_once(frontend, backend):
+    tuned = ct.autotune(configs=[{"value": 4}, {"value": 8}], grid=(1,))(_kernel)
+    x, _, _ = _args()
+
+    tuned(None, (x, 1.0))
+    tuned(None, (x, 2.0))
+    tuned.prepare(None, (x, 3.0))
+    tuned.launch_prepared(None)
+
+    assert backend.calls.count("compile") == 2
+    assert tuned.best_config.meta["value"] in (4, 8)
