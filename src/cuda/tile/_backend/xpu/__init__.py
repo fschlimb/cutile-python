@@ -1,0 +1,206 @@
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+"""cuTile backend targeting Intel XPUs through XeGPU and Level Zero.
+
+Compilation runs TileIRToMLIR and XeVM passes in the private native compiler;
+the resulting device binary is launched through the native
+:mod:`cuda.tile._backend.xpu._level_zero` extension.
+
+Select the backend and, optionally, tune the launch block::
+
+    ct.set_backend("xpu")
+    with ct.backend_options({"wg_m": 128, "wg_n": 128, "sg_m": 32, "sg_n": 32}):
+        ct.launch(stream, grid, matmul_kernel, args)
+"""
+import dataclasses
+import functools
+import hashlib
+import json
+import operator
+import os
+import struct
+from typing import Any, Mapping, NamedTuple
+
+from .._custom import bool_option, check_options, normalize_dims
+from .._custom import synchronize_stream as synchronize
+from .._signature import ArrayArgument, check_argument, runtime_parameters, scalar_format
+from .._native import compiler as native_compiler
+from .._native import file_fingerprint, invoke
+from ._level_zero import Kernel as _LevelZeroKernel
+
+# cuTile identifies a compile target by an arch string. Xe devices get values
+# that cannot collide with a CUDA SM number, plus the ocloc chip to target.
+_ARCHS = {
+    "b70": ("1070", "bmg"),
+    "b50": ("1050", "bmg"),
+    "pvc": ("2000", "pvc"),
+}
+_DEFAULT_ARCH = "b70"
+
+
+def _arch(arch: str) -> tuple[str, str]:
+    if arch not in _ARCHS:
+        raise ValueError(
+            f"XPU backend: unknown architecture {arch!r}; expected one of "
+            f"{', '.join(sorted(_ARCHS))}.")
+    return _ARCHS[arch]
+
+
+# Pinning the target means cuTile never probes a CUDA device (which would
+# dlopen libcuda) when this backend is active.
+sm_arch, _CHIP = _arch(os.environ.get("CUTILE_XPU_ARCH", _DEFAULT_ARCH))
+
+# Pin the TileIR bytecode version so cuTile does not probe the `tileiras`
+# compiler (which requires a CUDA toolkit) to auto-detect it.
+bytecode_version = "13.3"
+
+_SUBGROUP_SIZE = 16
+
+# Launch block used when neither ``block_threads`` nor tile sizes are given.
+_DEFAULT_BLOCK = (512, 1, 1)
+
+_TILE_OPTIONS = ("wg_m", "wg_n", "sg_m", "sg_n")
+_OPTIONS = ("block_threads", *_TILE_OPTIONS, "assume_in_bounds",
+            "xegpu_op_level", "large_register_file")
+
+
+def _launch_block(options: Mapping[str, Any]) -> tuple[int, int, int]:
+    """Return ``block_threads``, or derive ``((wg_m // sg_m) * (wg_n // sg_n) * 16, 1, 1)``.
+
+    Without either, :data:`_DEFAULT_BLOCK` applies.
+    """
+    tiles = [name for name in _TILE_OPTIONS if name in options]
+    if "block_threads" in options:
+        if tiles:
+            raise ValueError(
+                "XPU backend: give either block_threads or the tile sizes "
+                f"{', '.join(_TILE_OPTIONS)}, not both")
+        return normalize_dims(options["block_threads"])
+    if not tiles:
+        return _DEFAULT_BLOCK
+    if len(tiles) != len(_TILE_OPTIONS):
+        raise ValueError(
+            f"XPU backend: the tile sizes {', '.join(_TILE_OPTIONS)} must be given together")
+    wg_m, wg_n, sg_m, sg_n = (operator.index(options[name]) for name in _TILE_OPTIONS)
+    if min(sg_m, sg_n) <= 0 or wg_m <= 0 or wg_n <= 0 or wg_m % sg_m or wg_n % sg_n:
+        raise ValueError(
+            "XPU backend: wg_m and wg_n must be positive multiples of sg_m and sg_n")
+    return ((wg_m // sg_m) * (wg_n // sg_n) * _SUBGROUP_SIZE, 1, 1)
+
+
+_XEGPU_OP_LEVELS = ("workgroup", "subgroup", "lane")
+
+
+@dataclasses.dataclass(frozen=True)
+class Options:
+    """Validated compile options; ``block`` is baked into the binary."""
+
+    block: tuple[int, int, int]
+    assume_in_bounds: bool
+    xegpu_op_level: str
+    large_register_file: bool
+
+
+def normalize_options(options: Mapping[str, Any]) -> Options:
+    """Validate and normalize the options of a ``backend_options`` block.
+
+    =================== ================================================
+    key                 meaning
+    =================== ================================================
+    block_threads       launch block
+    wg_m, wg_n          work-group tile size; derive the launch block
+    sg_m, sg_n          subgroup tile size, given together with wg_m/wg_n
+    assume_in_bounds    mark transfers in-bounds
+    xegpu_op_level      initial XeGPU op level
+    large_register_file enable large register file (default)
+    =================== ================================================
+    """
+    check_options("XPU", options, _OPTIONS)
+    xegpu_op_level = options.get("xegpu_op_level", "workgroup")
+    if xegpu_op_level not in _XEGPU_OP_LEVELS:
+        raise ValueError(
+            f"XPU backend: xegpu_op_level must be one of "
+            f"{', '.join(_XEGPU_OP_LEVELS)}, got {xegpu_op_level!r}")
+    return Options(
+        block=_launch_block(options),
+        assume_in_bounds=bool_option("XPU", options, "assume_in_bounds", False),
+        xegpu_op_level=xegpu_op_level,
+        large_register_file=bool_option(
+            "XPU", options, "large_register_file", True),
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _ocloc_identity(_compiler_fingerprint: str) -> str:
+    """Cache successful version queries until the compiler file changes."""
+    return native_compiler("xpu").xpu_identity()
+
+
+def compiler_identity(options: Options):
+    """Build the XPU compiler identity for normalized effective options."""
+
+    try:
+        compiler = native_compiler("xpu")
+        fingerprint = file_fingerprint(compiler.__file__)
+        identity = {
+            "schema": 3,
+            "sm_arch": sm_arch,
+            "chip": _CHIP,
+            "options": dataclasses.asdict(options),
+            "compiler": fingerprint,
+            "ocloc": _ocloc_identity(fingerprint),
+            "cutile_xpu_backend": file_fingerprint(__file__),
+        }
+    except OSError:
+        return None
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def compile(bytecode: bytes, signature, options: Options) -> bytes:
+    """Compile TileIR bytecode into an Xe binary without command-line tools."""
+    del signature
+    return invoke(
+        "xpu", "compile_xpu", bytecode, options.block, options.assume_in_bounds,
+        options.xegpu_op_level, options.large_register_file, _CHIP,
+        bool(os.environ.get("CUTILE_XPU_DUMP_MLIR")))
+
+
+def _runtime_arguments(parameters, args) -> list:
+    """Scalars as ABI-typed bytes and arrays as ``(data, shape, strides)`` memrefs."""
+    runtime = []
+    for parameter, argument in zip(parameters, args, strict=True):
+        check_argument("XPU", "xpu", parameter, argument)
+        if isinstance(argument, ArrayArgument):
+            runtime.append((argument.pointer, argument.shape, argument.strides))
+        else:
+            runtime.append(struct.pack(scalar_format("XPU", parameter.dtype), argument))
+    return runtime
+
+
+class _Loaded(NamedTuple):
+    kernel: _LevelZeroKernel
+    parameters: tuple
+    block: tuple[int, int, int]
+
+
+def load(binary: bytes, signature, options: Options) -> _Loaded:
+    """Wrap a binary for Level Zero, bound to the block it was compiled for."""
+    return _Loaded(_LevelZeroKernel(binary, signature.symbol),
+                   runtime_parameters("XPU", signature), options.block)
+
+
+def launch(loaded: _Loaded, stream, grid, args):
+    """Run a loaded kernel synchronously through the Level Zero runtime."""
+    runtime_args = _runtime_arguments(loaded.parameters, args)
+
+    # The Level Zero runtime enqueues onto its own immediate command list, which
+    # is unordered with respect to ``stream``. Drain the caller's pending work
+    # (e.g. the tensor initialisation) first, otherwise it can land after the
+    # kernel and overwrite its results. The launch below blocks until the kernel
+    # completed, so ordering is restored on the way out.
+    synchronize(stream)
+
+    loaded.kernel.launch(runtime_args, normalize_dims(grid), loaded.block)

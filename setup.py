@@ -6,11 +6,37 @@ from setuptools import setup
 from setuptools.command.build_ext import build_ext
 from setuptools.extension import Extension
 import os
+import shlex
 import sys
 
 
-project_root = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.realpath(__file__))
 is_windows = sys.platform == "win32"
+
+# Every build variant builds the _cext extension. Variants other than "cuda" also
+# build their backend's extension from src/cuda/tile/_backend, which also installs
+# their runtime files.
+_backend_extensions = {
+    "cpu": "cuda.tile._backend.cpu._cpu",
+    "xpu": "cuda.tile._backend.xpu._level_zero",
+}
+build_variant = os.getenv("CUTILE_BUILD_VARIANT", "cuda")
+if build_variant != "cuda" and build_variant not in _backend_extensions:
+    raise RuntimeError("CUTILE_BUILD_VARIANT must be one of: "
+                       f"{', '.join(['cuda', *_backend_extensions])}")
+
+
+def _pip_cuda_toolkit_root():
+    """Root of the CUDA headers installed by the cuda-toolkit[cudart,nvvm] wheels."""
+    try:
+        import nvidia
+    except ImportError:
+        return None
+    for path in nvidia.__path__:
+        root = os.path.join(path, "cu13")
+        if os.path.isfile(os.path.join(root, "include", "cuda.h")):
+            return root
+    return None
 
 
 class BuildExtWithCmake(build_ext):
@@ -52,7 +78,14 @@ class BuildExtWithCmake(build_ext):
                      f"-DXLA_PATH={xla_path}",
                      f"-DCMAKE_BUILD_TYPE={build_type}",
                      f"-DPython_EXECUTABLE={sys.executable}",
-                     "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"]
+                     "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+                     f"-DCUTILE_BUILD_VARIANT={build_variant}"]
+        if build_variant != "cuda" and "CUDAToolkit_ROOT" not in os.environ:
+            # Non-CUDA variants need only the CUDA headers to build _cext.
+            cuda_root = _pip_cuda_toolkit_root()
+            if cuda_root is not None:
+                cmake_cmd.append(f"-DCUDAToolkit_ROOT={cuda_root}")
+        cmake_cmd.extend(shlex.split(os.getenv("CMAKE_ARGS", "")))
         if self.disable_internal:
             cmake_cmd.append("-DDISABLE_INTERNAL=1")
         if self.minimal_internal:
@@ -82,7 +115,14 @@ class BuildExtWithCmake(build_ext):
         self._cmake(build_dir, build_type, dlpack_path, xla_path)
         self._make(build_dir, build_type, parallel)
 
+        if build_variant != "cuda":
+            prefix = os.path.join(project_root, "src") if self.editable_mode else self.build_lib
+            self.spawn(["cmake", "--install", build_dir, "--prefix", os.path.abspath(prefix),
+                        "--component", "cuTileBackend"])
+
         for ext in self.extensions:
+            if ext.name in _backend_extensions.values():
+                continue  # installed by `cmake --install` above
             src_dir = _get_csrc_dir(ext.name)
             ext_name = _get_build_lib_filename(ext.name)
             if is_windows:
@@ -110,8 +150,12 @@ def _get_build_lib_filename(ext_name: str):
 
 
 setup(
+    options=({"build": {"build_base": "build/python-" + build_variant}}
+             if build_variant != "cuda" else {}),
     ext_modules=[
         Extension("cuda.tile._cext", []),
+        *([Extension(_backend_extensions[build_variant], [])]
+          if build_variant != "cuda" else []),
     ],
     cmdclass=dict(
         build_ext=BuildExtWithCmake,

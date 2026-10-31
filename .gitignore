@@ -13,6 +13,7 @@ deps
 *.nsys-rep
 *.so
 build/
+.llvm-project/
 .cache
 .idea
 .rgignore

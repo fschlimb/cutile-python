@@ -4,8 +4,6 @@
 
 from cuda.tile._version import __version__  # noqa
 
-from cuda.tile._cext import launch
-
 from cuda.tile._by_target import ByTarget
 
 from cuda.tile._memory_model import (
@@ -180,6 +178,8 @@ from cuda.tile._context import compiler_timeout
 
 from cuda.tile import tune
 
+from cuda.tile._backend import launch, set_backend, clear_backend, backend_options
+
 from cuda.tile._execution import (
     function,
     kernel
@@ -189,6 +189,9 @@ import cuda.tile.compilation as compilation
 
 __all__ = [
     "launch",
+    "set_backend",
+    "clear_backend",
+    "backend_options",
 
     "ByTarget",
 

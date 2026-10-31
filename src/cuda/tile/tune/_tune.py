@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Sequence, TypeVar
 
+from cuda.tile import _backend
 from cuda.tile._cext import _benchmark
 from cuda.tile._execution import kernel as TileKernel
 from cuda.tile.tune._tune_utils import benchmark_with_timeout
@@ -145,7 +146,7 @@ def exhaustive_search(
 
     Args:
         search_space: Sequence of configs to evaluate.
-        stream: The CUDA stream to execute kernel on.
+        stream: The stream to execute kernel on (``None`` for the CPU backend).
         grid_fn: Maps a config to grid dimensions.
         kernel: The kernel to tune, or a function mapping a config to the kernel to
             tune. For best performance when using a function, return the same kernel
@@ -156,9 +157,10 @@ def exhaustive_search(
         single_run_timeout_sec: Wall-time timeout (in seconds) per kernel launch,
             enforced by running benchmarks in a subprocess. When None (the
             default), timeouts are disabled and kernels run directly without a
-            subprocess.
+            subprocess. Requires CUDA; not supported by custom backends.
         flush_l2: Flush L2 before each kernel run. Defaults to True. Set to False
-            to measure without deliberately evicting cached data.
+            to measure without deliberately evicting cached data. Ignored by
+            custom backends.
 
 
     Returns:
@@ -244,6 +246,8 @@ def exhaustive_search(
 
     if total == 0:
         raise ValueError("Search space is empty.")
+    if single_run_timeout_sec is not None and _backend.get_backend() is not None:
+        raise ValueError("single_run_timeout_sec is not supported by custom backends.")
 
     # min-heap of running candidates, sorted by (mean_us, error_margin_us).
     # The integer tie-breaker keeps heap operations stable when timings match.
@@ -348,6 +352,13 @@ _WARM_UP_REPEATS = 3
 _TOP_K = 5
 
 
+def _benchmark_launch(stream, grid, kernel, args, flush_l2: bool) -> float:
+    """Time one launch in microseconds on the active custom backend or on CUDA."""
+    if _backend.get_backend() is not None:
+        return _backend.benchmark(stream, grid, kernel, args)
+    return _benchmark(stream, grid, kernel, args, flush_l2)
+
+
 @dataclass
 class _TimingCandidate(Generic[T]):
     config: T
@@ -370,11 +381,12 @@ class _TimingCandidate(Generic[T]):
                     stream, self.grid, self.kernel, self.get_args(), launch_timeout_sec,
                     self.flush_l2)
             else:
-                _benchmark(stream, self.grid, self.kernel, self.get_args(), self.flush_l2)
+                _benchmark_launch(
+                    stream, self.grid, self.kernel, self.get_args(), self.flush_l2)
 
     def run_benchmark(self, stream, num_times):
         for _ in range(min(num_times, _MAX_REPEATS - self.num_samples)):
-            self._add_sample(_benchmark(
+            self._add_sample(_benchmark_launch(
                 stream, self.grid, self.kernel, self.get_args(), self.flush_l2))
 
     def converged(self) -> bool:

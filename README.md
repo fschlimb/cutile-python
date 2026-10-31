@@ -8,6 +8,11 @@ cuTile Python is a programming language for NVIDIA GPUs. The official documentat
 on [docs.nvidia.com](https://docs.nvidia.com/cuda/cutile-python),
 or built from source located in the [docs](docs/) folder.
 
+Non-CUDA Backends
+-----------------
+
+Experimental CPU and Intel XPU backends are described in
+[src/cuda/tile/_backend/README.md](src/cuda/tile/_backend/README.md).
 
 Example
 -------

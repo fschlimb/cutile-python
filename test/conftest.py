@@ -142,9 +142,14 @@ def pytest_sessionstart(session):
     Called after the Session object has been created and
     before performing collection and entering the run test loop.
     """
-    print("Tile compiler path:", _find_compiler_bin().path)
+    try:
+        compiler_path = _find_compiler_bin().path
+    except FileNotFoundError:  # no CUDA toolkit, e.g. when testing a custom backend
+        compiler_path = None
+    print("Tile compiler path:", compiler_path)
     print("Dev features enabled:", dev_features_enabled())
-    print("Bytecode version:", get_tileiras_version().as_string())
+    if compiler_path is not None:
+        print("Bytecode version:", get_tileiras_version().as_string())
 
     lock_gpu_clock = session.config.getoption("lock_gpu_clock", default=None)
     if not session.config.option.collectonly and lock_gpu_clock is not None:
@@ -172,7 +177,10 @@ def requires_tileiras(version: BytecodeVersion):
             reason=f"Requires dev features enabled for version {vstr(version)}"
         )
 
-    current = get_tileiras_version()
+    try:
+        current = get_tileiras_version()
+    except FileNotFoundError:
+        return pytest.mark.skip(reason="Requires tileiras, which was not found")
     return pytest.mark.skipif(
         current < version,
         reason=f"Requires tileiras {vstr(version)}, found {vstr(current)}"

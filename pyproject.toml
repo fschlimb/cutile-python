@@ -38,8 +38,34 @@ dependencies = [
   "typing-extensions",
 ]
 
+# Installed by `uv sync`, which builds cuda-tile in this environment so that the
+# persistent CMake build tree keeps referring to the same Python and nanobind.
+[dependency-groups]
+build = [
+    "setuptools==84.0.0",
+    "wheel",
+    "cmake>=3.24,<4",
+    "ninja",
+    "nanobind>=2.9,<3",
+    "pybind11>=2.13.1",
+    "patchelf; sys_platform == 'linux'",
+    # CUDA headers for building the _cext extension without a CUDA Toolkit, as
+    # for the cpu and xpu variants; running those variants does not need CUDA.
+    "cuda-toolkit[cudart,nvvm]>=13.2,<13.6; sys_platform == 'linux'",
+]
+
 [project.optional-dependencies]
 tileiras = [ "cuda-toolkit[tileiras,nvcc,nvvm]>=13.2,<13.6" ]
+cpu = [
+    "numpy",
+    "torch",
+]
+xpu = [
+    "numpy",
+    "torch==2.13.0+xpu; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # A dependency of torch, listed so that uv takes it from the PyTorch XPU index.
+    "triton-xpu==3.7.2; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
 [project.urls]
 Homepage = "https://github.com/nvidia/cutile-python"
@@ -64,13 +90,61 @@ include = [
     "cuda.tile._passes",
     "cuda.tile._bytecode",
     "cuda.tile._library_lifecycle",
+    "cuda.tile._backend",
+    "cuda.tile._backend.cpu",
+    "cuda.tile._backend.xpu",
     "cuda.tile.tune",
     "cuda.tile.jax",
 ]
 
 [tool.setuptools.package-data]
 "cuda.tile" = ["VERSION", "_cext.pyi"]
+"cuda.tile._backend.cpu" = ["*.mlir"]
 
 
 [tool.uv]
 managed = true
+no-build-isolation-package = ["cuda-tile"]
+default-groups = ["build"]
+conflicts = [
+    [{ extra = "cpu" }, { extra = "xpu" }],
+]
+# Without this, uv derives a key from `packages.find.where` and stores it as an
+# mtime while comparing it as an inode, so it rebuilds on every sync.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "setup.py" },
+    { file = "CMakeLists.txt" },
+    { file = "cmake/**" },
+    { file = "cext/**" },
+    # Backend build sources only: installed binaries also live in this tree.
+    { file = "src/cuda/tile/_backend/**/CMakeLists.txt" },
+    { file = "src/cuda/tile/_backend/**/*.cmake" },
+    { file = "src/cuda/tile/_backend/**/*.in" },
+    { file = "src/cuda/tile/_backend/**/*.cpp" },
+    { file = "src/cuda/tile/_backend/**/*.h" },
+    { file = "tileir-to-mlir/llvm-revision.txt" },
+    { file = "tileir-to-mlir/CMakeLists.txt" },
+    { file = "tileir-to-mlir/include/**" },
+    { file = "tileir-to-mlir/lib/**" },
+    { env = "CUTILE_BUILD_VARIANT" },
+    { env = "CMAKE_ARGS" },
+    { env = "USE_LLVM_REVISION" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-xpu", extra = "xpu" },
+]
+triton-xpu = { index = "pytorch-xpu" }

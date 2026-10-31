@@ -114,6 +114,11 @@ endif()
 add_subdirectory(cext)
 add_subdirectory(experimental/cuda-lang/)
 
+# Non-CUDA backends (cpu, xpu) additionally build their own source tree.
+if (CUTILE_BUILD_VARIANT AND NOT CUTILE_BUILD_VARIANT STREQUAL "cuda")
+    add_subdirectory(src/cuda/tile/_backend)
+endif()
+
 
 option(DISABLE_INTERNAL "disable internal" OFF)
 if (NOT DISABLE_INTERNAL)

@@ -1,0 +1,324 @@
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+from concurrent.futures import ThreadPoolExecutor
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+from types import SimpleNamespace
+import warnings
+
+import numpy as np
+import pytest
+
+import cuda.tile as ct
+from cuda.tile._backend import _custom, _native, cpu
+from cuda.tile._backend._signature import build_signature, constant_parameters
+from cuda.tile._cext import default_tile_context
+from cuda.tile._exception import TileCompilerTimeoutError
+
+
+def test_native_compiler_rejects_wrong_variant(monkeypatch):
+    monkeypatch.setattr(
+        _native.importlib, "import_module", lambda _: SimpleNamespace(backend="cpu"))
+    with pytest.raises(RuntimeError, match="targets cpu, not xpu"):
+        _native.compiler("xpu")
+
+
+def test_default_compilation_stays_in_process(monkeypatch):
+    monkeypatch.setattr(
+        default_tile_context.config, "compiler_timeout_sec", None)
+    monkeypatch.setattr(_native, "compiler", lambda _: SimpleNamespace(
+        compile_cpu=lambda data, flag: data + bytes([flag])))
+    monkeypatch.setattr(
+        _native.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("unexpected compiler subprocess"))
+    assert _native.invoke("cpu", "compile_cpu", b"input", True) == b"input\x01"
+
+
+def test_explicit_timeout_uses_worker_and_reports_diagnostics(monkeypatch, capsys):
+    monkeypatch.setattr(default_tile_context.config, "compiler_timeout_sec", 7.5)
+    monkeypatch.setattr(_native, "compiler", lambda _: SimpleNamespace(__file__="/compiler"))
+
+    def run(command, **kwargs):
+        assert Path(command[0]).is_absolute()
+        assert kwargs["timeout"] == 7.5
+        assert kwargs["input"] == b"input"
+        return SimpleNamespace(returncode=0, stdout=b"binary", stderr=b"warning\n")
+
+    monkeypatch.setattr(_native.subprocess, "run", run)
+    assert _native.invoke("cpu", "compile_cpu", b"input", True) == b"binary"
+    assert capsys.readouterr().err == "warning\n"
+
+
+def test_native_timeout_is_reported(monkeypatch):
+    monkeypatch.setattr(default_tile_context.config, "compiler_timeout_sec", 0.1)
+    monkeypatch.setattr(_native, "compiler", lambda _: SimpleNamespace(__file__="/compiler"))
+
+    def run(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(_native.subprocess, "run", run)
+    with pytest.raises(TileCompilerTimeoutError, match="exceeded"):
+        _native.invoke("cpu", "compile_cpu", b"input")
+
+
+def test_worker_failure_is_not_a_binary(monkeypatch):
+    monkeypatch.setattr(default_tile_context.config, "compiler_timeout_sec", 1)
+    monkeypatch.setattr(_native, "compiler", lambda _: SimpleNamespace(__file__="/compiler"))
+    monkeypatch.setattr(_native.subprocess, "run", lambda *args, **kwargs:
+                        SimpleNamespace(returncode=-6, stdout=b"", stderr=b"compiler error"))
+    with pytest.raises(RuntimeError, match="compiler error"):
+        _native.invoke("cpu", "compile_cpu", b"input")
+
+
+@pytest.mark.parametrize("code, exception", [(2, ValueError), (3, RuntimeError)])
+def test_worker_preserves_known_exception_types(monkeypatch, code, exception):
+    monkeypatch.setattr(default_tile_context.config, "compiler_timeout_sec", 1)
+    monkeypatch.setattr(_native, "compiler", lambda _: SimpleNamespace(__file__="/compiler"))
+    monkeypatch.setattr(_native.subprocess, "run", lambda *args, **kwargs:
+                        SimpleNamespace(returncode=code, stdout=b"", stderr=b"native error"))
+    with pytest.raises(exception) as caught:
+        _native.invoke("cpu", "compile_cpu", b"input")
+    assert str(caught.value) == "native error"
+
+
+def test_file_fingerprint_tracks_rebuilds_and_resolves_symlinks(tmp_path):
+    path = tmp_path / "compiler.so"
+    path.write_bytes(b"first")
+    alias = tmp_path / "alias.so"
+    alias.symlink_to(path)
+    first = _native.file_fingerprint(str(path))
+    assert _native.file_fingerprint(str(alias)) == first
+    path.write_bytes(b"rebuilt compiler")
+    assert _native.file_fingerprint(str(path)) != first
+
+
+@ct.kernel
+def _waves(x, out, TILE: ct.Constant[int]):
+    value = ct.load(x, index=(ct.bid(0),), shape=(TILE,))
+    ct.store(out, index=(ct.bid(0),), tile=ct.sin(value) + ct.cos(value))
+
+
+@ct.kernel
+def _empty():
+    pass
+
+
+@ct.kernel
+def _add_one(x, out, TILE: ct.Constant[int]):
+    value = ct.load(x, index=(ct.bid(0),), shape=(TILE,))
+    ct.store(out, index=(ct.bid(0),), tile=value + 1)
+
+
+def _bytecode(kernel, arguments, backend):
+    from cuda.tile._compile import compile_tile, parse_bytecode_version
+
+    result = compile_tile(
+        kernel._annotated_function, (build_signature(kernel, arguments),),
+        backend.sm_arch, kernel._compiler_options, default_tile_context,
+        bytecode_version=parse_bytecode_version(backend.bytecode_version),
+        return_bytecode=True, return_cubin=False)
+    return bytes(result.bytecode), result.kernel_signatures[0]
+
+
+@pytest.fixture
+def native(monkeypatch):
+    module = pytest.importorskip("cuda.tile._backend._compiler")
+    monkeypatch.setattr(default_tile_context.config, "compiler_timeout_sec", None)
+    return module
+
+
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_cpu_compiles_and_links_without_external_tools(native, monkeypatch, concurrent):
+    if native.backend != "cpu":
+        pytest.skip("requires the CPU compiler")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(
+        _native.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("unexpected compiler subprocess"))
+    x = np.linspace(-1, 1, 128, dtype=np.float32)
+    out = np.empty_like(x)
+    arguments = (x, out, 16)
+    bytecode, signature = _bytecode(_waves, arguments, cpu)
+    options = cpu.Options(False)
+    identity = cpu.compiler_identity(options)
+    assert isinstance(identity, str) and len(identity) == 64
+    if concurrent:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            binaries = list(pool.map(lambda _: cpu.compile(bytecode, signature, options), range(4)))
+    else:
+        binaries = [cpu.compile(bytecode, signature, options) for _ in range(3)]
+    constants = constant_parameters(_waves)
+    runtime = _custom._runtime_arguments(
+        arguments, constants, _custom._describe(constants, arguments))
+    for binary in binaries:
+        assert binary.startswith(b"\x7fELF")
+        out.fill(np.nan)
+        loaded = cpu.load(binary, signature, options)
+        cpu.launch(loaded, None, (8,), runtime)
+        np.testing.assert_allclose(out, np.sin(x) + np.cos(x), rtol=2e-6, atol=2e-6)
+
+
+def test_invalid_bytecode_does_not_poison_compiler(native, tmp_path):
+    if native.backend != "cpu":
+        pytest.skip("requires the CPU compiler")
+    with pytest.raises(ValueError, match="invalid TileIR"):
+        native.compile_cpu(b"invalid", cpu._lowering_pipeline(), False, str(tmp_path))
+    bytecode, signature = _bytecode(_empty, (), cpu)
+    assert cpu.compile(bytecode, signature, cpu.Options(False)).startswith(b"\x7fELF")
+
+
+def test_native_mlir_errors_include_diagnostics(native):
+    if native.backend != "cpu":
+        pytest.skip("requires the CPU compiler")
+    with pytest.raises(RuntimeError, match="parsing MLIR"):
+        native.lower_cpu_mlir(b"not MLIR", cpu._lowering_pipeline())
+
+
+def test_cpu_compiles_in_forked_child_after_parent_compiled(native):
+    if native.backend != "cpu":
+        pytest.skip("requires the CPU compiler")
+    x = np.zeros(128, dtype=np.float32)
+    bytecode, signature = _bytecode(_waves, (x, np.empty_like(x), 16), cpu)
+    options = cpu.Options(False)
+    cpu.compile(bytecode, signature, options)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        pid = os.fork()
+    if pid == 0:
+        status = 1
+        try:
+            signal.alarm(60)
+            status = 0 if cpu.compile(bytecode, signature, options).startswith(b"\x7fELF") else 2
+        finally:
+            os._exit(status)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+
+
+_MALLOC_SHIM = b"""
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stddef.h>
+void *malloc(size_t size) {
+  static void *(*next)(size_t);
+  if (!next)
+    next = (void *(*)(size_t))dlsym(RTLD_NEXT, "malloc");
+  return next(size);
+}
+"""
+
+_PRELOADED_COMPILE = """\
+import sys, tempfile
+from cuda.tile._backend import _compiler
+from cuda.tile._backend import cpu
+with tempfile.TemporaryDirectory() as directory:
+    sys.stdout.buffer.write(_compiler.compile_cpu(
+        sys.stdin.buffer.read(), cpu._lowering_pipeline(), False, directory))
+"""
+
+
+def test_cpu_links_system_libraries_despite_preloaded_allocator(native, tmp_path):
+    if native.backend != "cpu":
+        pytest.skip("requires the CPU compiler")
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("building the malloc shim requires cc")
+    shim = tmp_path / "libmalloc-shim.so"
+    subprocess.run([compiler, "-shared", "-fPIC", "-x", "c", "-", "-o", str(shim), "-ldl"],
+                   input=_MALLOC_SHIM, check=True)
+    x = np.zeros(128, dtype=np.float32)
+    bytecode, _ = _bytecode(_waves, (x, np.empty_like(x), 16), cpu)
+    binary = subprocess.run(
+        [sys.executable, "-c", _PRELOADED_COMPILE], input=bytecode,
+        env={**os.environ, "LD_PRELOAD": str(shim)},
+        capture_output=True, check=True, timeout=300).stdout
+    assert binary.startswith(b"\x7fELF")
+    assert b"libm.so.6" in binary
+    assert str(shim).encode() not in binary
+
+
+def test_native_worker_compiles_bytecode(native, monkeypatch):
+    if native.backend == "cpu":
+        backend, options = cpu, cpu.Options(False)
+    else:
+        from cuda.tile._backend import xpu
+        backend = xpu
+        options = xpu.normalize_options({"block_threads": 32})
+    bytecode, signature = _bytecode(_empty, (), backend)
+    monkeypatch.setattr(default_tile_context.config, "compiler_timeout_sec", 30)
+    assert backend.compile(bytecode, signature, options).startswith(b"\x7fELF")
+
+
+@pytest.mark.parametrize("timeout", [None, 30])
+def test_native_errors_are_consistent_with_and_without_worker(
+        native, monkeypatch, tmp_path, timeout):
+    if native.backend != "cpu":
+        pytest.skip("requires the CPU compiler")
+    monkeypatch.setattr(default_tile_context.config, "compiler_timeout_sec", timeout)
+    with pytest.raises(ValueError, match="invalid TileIR bytecode") as caught:
+        _native.invoke("cpu", "compile_cpu", b"invalid", cpu._lowering_pipeline(),
+                       False, str(tmp_path))
+    assert "Traceback" not in str(caught.value)
+    bytecode, _ = _bytecode(_empty, (), cpu)
+    with pytest.raises(RuntimeError, match="parsing the CPU pipeline") as caught:
+        _native.invoke("cpu", "compile_cpu", bytecode, "builtin.module(not-a-pass)",
+                       False, str(tmp_path))
+    assert "Traceback" not in str(caught.value)
+
+
+@pytest.mark.parametrize("large_register_file", [False, True])
+@pytest.mark.parametrize("with_memory", [False, True])
+def test_xpu_compiles_bytecode_without_tools_or_mlir_python(
+        native, monkeypatch, tmp_path, large_register_file, with_memory):
+    if native.backend != "xpu":
+        pytest.skip("requires the XPU compiler")
+    from cuda.tile._backend import xpu
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(
+        _native.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("unexpected compiler subprocess"))
+    monkeypatch.chdir(tmp_path)
+    arguments = (np.zeros(256, dtype=np.float32), np.empty(256, dtype=np.float32), 256)
+    bytecode, signature = _bytecode(
+        _add_one if with_memory else _empty, arguments if with_memory else (), xpu)
+    options = xpu.normalize_options({
+        "block_threads": 32,
+        "large_register_file": large_register_file})
+    identity = xpu.compiler_identity(options)
+    assert isinstance(identity, str) and len(identity) == 64
+    assert xpu.compiler_identity(options) == identity
+    assert not (tmp_path / "IGC_REVISION").exists()
+    assert xpu.compile(bytecode, signature, options).startswith(b"\x7fELF")
+
+
+def test_xpu_large_register_file_reaches_offline_compiler(native):
+    if native.backend != "xpu":
+        pytest.skip("requires the XPU compiler")
+    from cuda.tile._backend import xpu
+
+    arguments = (np.zeros(256, dtype=np.float32), np.empty(256, dtype=np.float32), 256)
+    bytecode, signature = _bytecode(_add_one, arguments, xpu)
+    default, large = (xpu.compile(bytecode, signature, xpu.normalize_options({
+        "block_threads": 32, "large_register_file": large}))
+        for large in (False, True))
+    assert default != large
+
+
+def test_xpu_compiles_concurrently(native, monkeypatch):
+    if native.backend != "xpu":
+        pytest.skip("requires the XPU compiler")
+    from cuda.tile._backend import xpu
+
+    monkeypatch.setenv("PATH", "")
+    arguments = (np.zeros(256, dtype=np.float32), np.empty(256, dtype=np.float32), 256)
+    bytecode, signature = _bytecode(_add_one, arguments, xpu)
+    options = xpu.normalize_options({"block_threads": 32})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        binaries = list(pool.map(lambda _: xpu.compile(bytecode, signature, options), range(4)))
+    assert all(binary.startswith(b"\x7fELF") for binary in binaries)

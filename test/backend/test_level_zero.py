@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+import pytest
+
+_level_zero = pytest.importorskip(
+    "cuda.tile._backend.xpu._level_zero", reason="needs the Level Zero extension")
+
+
+def test_kernel_argument_expansion():
+    arguments = [(1234, (2, 3), (3, 1)), (7).to_bytes(4, "little")]
+    assert _level_zero._kernel_parameter_count(arguments) == 8
+
+
+@pytest.mark.parametrize(
+    "arguments, match",
+    [
+        ([(1234, (2,), (1, 1))], "equal length"),
+        ([b"abc"], "1, 2, 4, or 8"),
+        ([(1234, (-1,), (1,))], "non-negative"),
+    ],
+)
+def test_kernel_argument_validation(arguments, match):
+    with pytest.raises(ValueError, match=match):
+        _level_zero._kernel_parameter_count(arguments)
+
+
+def test_launch_validation_does_not_initialize_runtime():
+    with pytest.raises(ValueError, match="must not be empty"):
+        _level_zero.Kernel(b"", "kernel")
+    with pytest.raises(ValueError, match="must not be empty"):
+        _level_zero.Kernel(b"module", "")
+
+    with pytest.raises(TypeError):
+        _level_zero.Kernel(b"module", "kernel").launch([], (1, 1), (1, 1, 1))
