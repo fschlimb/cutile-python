@@ -12,7 +12,7 @@ import sys
 import pytest
 
 _level_zero = pytest.importorskip(
-    "cuda.tile._backend.xpu._level_zero", reason="needs the Level Zero extension")
+    "cuda.tile._backends.xpu._level_zero", reason="needs the Level Zero extension")
 
 
 def test_kernel_argument_expansion():
@@ -60,7 +60,7 @@ def test_zero_grid_does_not_initialize_runtime():
 
 
 def test_cpu_and_xpu_launcher_types_do_not_collide():
-    cpu = pytest.importorskip("cuda.tile._backend.cpu._cpu")
+    cpu = pytest.importorskip("cuda.tile._backends.cpu._cpu")
     assert cpu.Kernel is not _level_zero.Kernel
 
 

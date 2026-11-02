@@ -1,4 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights
+// reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -17,7 +18,7 @@
 
 namespace cutile {
 
-// Backend hooks, implemented by exactly one of cpu.cpp and xpu.cpp.
+// Backend hooks, implemented by exactly one backend's compiler source.
 extern const char *const backendName;
 void registerBackendTranslations(mlir::DialectRegistry &registry);
 void registerBackendPasses();

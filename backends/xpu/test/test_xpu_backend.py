@@ -8,14 +8,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-pytest.importorskip("cuda.tile._backend.xpu._level_zero",
+pytest.importorskip("cuda.tile._backends.xpu._level_zero",
                     reason="needs the Level Zero extension")
 
 import cuda.tile as ct  # noqa: E402
-from cuda.tile import _backend  # noqa: E402
-from cuda.tile._backend import xpu  # noqa: E402
-from cuda.tile._backend import _custom  # noqa: E402
-from cuda.tile._backend._signature import build_signature, constant_parameters  # noqa: E402
+from cuda.tile import _backends as _backend  # noqa: E402
+from cuda.tile._backends import xpu  # noqa: E402
+from cuda.tile._backends import _custom  # noqa: E402
+from cuda.tile._backends._signature import build_signature, constant_parameters  # noqa: E402
 
 _OPTIONS = {"wg_m": 128, "wg_n": 64, "sg_m": 32, "sg_n": 32}
 

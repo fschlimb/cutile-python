@@ -12,9 +12,9 @@ import numpy as np
 import pytest
 
 import cuda.tile as ct
-from cuda.tile import _backend
-from cuda.tile._backend import ArrayArgument, _custom
-from cuda.tile._backend._signature import build_signature, check_argument
+from cuda.tile import _backends as _backend
+from cuda.tile._backends import ArrayArgument, _custom
+from cuda.tile._backends._signature import build_signature, check_argument
 
 
 @ct.kernel

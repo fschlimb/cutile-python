@@ -13,8 +13,8 @@ import threading
 from types import MappingProxyType
 from typing import Any
 
-from cuda.tile import _backend
-from cuda.tile._backend._signature import array_metadata, constant_key, constant_parameters
+from cuda.tile import _backends as _backend
+from cuda.tile._backends._signature import array_metadata, constant_key, constant_parameters
 from cuda.tile.tune._tune import _benchmark_launch, exhaustive_search
 
 

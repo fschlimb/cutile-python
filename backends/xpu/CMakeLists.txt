@@ -13,7 +13,7 @@ find_library(LevelZeroRuntime_LIBRARY
           ENV LIBRARY_PATH ENV LD_LIBRARY_PATH
     PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu REQUIRED)
 
-nanobind_add_module(_level_zero FREE_THREADED level_zero.cpp)
+nanobind_add_module(_level_zero FREE_THREADED launcher_xpu.cpp)
 target_include_directories(_level_zero PRIVATE "${LevelZeroRuntime_INCLUDE_DIR}")
 target_link_libraries(_level_zero PRIVATE "${LevelZeroRuntime_LIBRARY}")
 

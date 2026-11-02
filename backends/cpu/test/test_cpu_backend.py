@@ -15,9 +15,9 @@ from types import SimpleNamespace
 from typing import Annotated
 
 import cuda.tile as ct
-from cuda.tile import _backend
-from cuda.tile._backend import _custom, cpu
-from cuda.tile._backend._signature import build_signature, constant_parameters, runtime_parameters
+from cuda.tile import _backends as _backend
+from cuda.tile._backends import _custom, cpu
+from cuda.tile._backends._signature import build_signature, constant_parameters, runtime_parameters
 import numpy as np
 import pytest
 import torch
@@ -277,7 +277,7 @@ def test_load_prepares_native_launcher_once(monkeypatch):
         def launch(self, *args):
             calls.append(("launch", args))
 
-    monkeypatch.setitem(sys.modules, "cuda.tile._backend.cpu._cpu", SimpleNamespace(Kernel=Kernel))
+    monkeypatch.setitem(sys.modules, "cuda.tile._backends.cpu._cpu", SimpleNamespace(Kernel=Kernel))
 
     runtime = _runtime(_vector_add, arguments)
     loaded = cpu.load(b"object", signature, cpu.Options(False))
@@ -335,8 +335,8 @@ def test_packed_argument_slots_have_fixed_offsets():
 
 @pytest.fixture
 def native_cpu():
-    pytest.importorskip("cuda.tile._backend.cpu._cpu")
-    compiler = pytest.importorskip("cuda.tile._backend._compiler")
+    pytest.importorskip("cuda.tile._backends.cpu._cpu")
+    compiler = pytest.importorskip("cuda.tile._backends._compiler")
     if compiler.backend != "cpu":
         pytest.skip("requires the native CPU compiler")
     _backend.set_backend("cpu")
@@ -400,7 +400,7 @@ module {
     reason="requires Linux with AMX tile support",
 )
 def test_native_import_enables_amx_tile_data():
-    pytest.importorskip("cuda.tile._backend.cpu._cpu")
+    pytest.importorskip("cuda.tile._backends.cpu._cpu")
     assert cpu._amx_enabled()
     subprocess.run([sys.executable, "-c", """
 import ctypes
@@ -408,7 +408,7 @@ import torch
 
 # Create an OpenMP worker pool before enabling process-wide AMX permission.
 torch.ones(64, 64).sum()
-import cuda.tile._backend.cpu._cpu
+import cuda.tile._backends.cpu._cpu
 
 libc = ctypes.CDLL(None, use_errno=True)
 permissions = ctypes.c_ulong()
@@ -524,7 +524,7 @@ def test_native_reduction_and_libm():
 @pytest.mark.usefixtures("native_cpu")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_native_matmul(dtype):
-    path = Path(__file__).resolve().parents[2] / "samples" / "MatMul.py"
+    path = Path(__file__).resolve().parents[3] / "samples" / "MatMul.py"
     spec = importlib.util.spec_from_file_location("cuda_sample_matmul", path)
     sample = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sample)
@@ -545,7 +545,7 @@ def test_native_matmul(dtype):
 @pytest.mark.parametrize("blocking_factor_k", [1, 2, 4])
 @pytest.mark.parametrize("threads", [1, 3])
 def test_native_sfc_bfloat16_matmul(blocking_factor_k, threads):
-    path = (Path(__file__).resolve().parents[2]
+    path = (Path(__file__).resolve().parents[3]
             / "samples" / "cpu" / "utils" / "sfc_matmul.py")
     spec = importlib.util.spec_from_file_location("cpu_sample_sfc_matmul", path)
     sample = importlib.util.module_from_spec(spec)
@@ -573,7 +573,7 @@ def test_only_the_amx_schedule_emits_amx(monkeypatch, tmp_path):
         return invoke(*args[:6], str(dumps[-1]), *args[7:])
 
     monkeypatch.setattr(cpu, "invoke", dumping_invoke)
-    path = Path(__file__).resolve().parents[2] / "samples" / "cpu" / "utils" / "sfc_matmul.py"
+    path = Path(__file__).resolve().parents[3] / "samples" / "cpu" / "utils" / "sfc_matmul.py"
     spec = importlib.util.spec_from_file_location("cpu_sample_sfc_matmul_amx", path)
     sample = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sample)
@@ -595,7 +595,7 @@ def test_only_the_amx_schedule_emits_amx(monkeypatch, tmp_path):
 @pytest.mark.usefixtures("native_cpu")
 @pytest.mark.parametrize("scaling_block_size", [16, 32])
 def test_swizzled_scale_tile_shape_is_independent_of_scaling_block_size(scaling_block_size):
-    path = Path(__file__).resolve().parents[2] / "samples" / "cpu" / "BlockScaledMatMul-cpu.py"
+    path = Path(__file__).resolve().parents[3] / "samples" / "cpu" / "BlockScaledMatMul-cpu.py"
     spec = importlib.util.spec_from_file_location("cpu_sample_block_scaled_matmul", path)
     sample = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sample)
@@ -681,7 +681,7 @@ def test_existing_flat_cpu_abi_still_executes(monkeypatch, tmp_path):
 
 @pytest.fixture(scope="module")
 def openmp_probe(tmp_path_factory):
-    native = pytest.importorskip("cuda.tile._backend.cpu._cpu")
+    native = pytest.importorskip("cuda.tile._backends.cpu._cpu")
     path = tmp_path_factory.mktemp("cpu-probe") / "probe.so"
     source = b"""
 #include <stdint.h>

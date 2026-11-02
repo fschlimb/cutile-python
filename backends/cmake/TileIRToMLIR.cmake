@@ -105,7 +105,7 @@ set(_cutile_llvm_cmake_args
     "-DLLVM_EXTERNAL_TILEIRTOMLIR_SOURCE_DIR:PATH=${_tileir_to_mlir_dir}"
     # Explicit, so that a shared LLVM tree never keeps another checkout's path.
     "-DTILEIR_TO_MLIR_CUDA_TILE_SOURCE_DIR:PATH=${_tileir_to_mlir_dir}/third_party/cuda-tile"
-    "-DLLVM_EXTERNAL_CUTILECOMPILER_SOURCE_DIR:PATH=${CMAKE_CURRENT_SOURCE_DIR}/compiler"
+    "-DLLVM_EXTERNAL_CUTILECOMPILER_SOURCE_DIR:PATH=${CMAKE_CURRENT_SOURCE_DIR}"
     "-DCUTILE_BUILD_VARIANT:STRING=${CUTILE_BUILD_VARIANT}"
     "-DUSE_LLVM_REVISION:STRING=${_cutile_llvm_override}"
     -DLLVM_USE_LINKER:STRING=lld

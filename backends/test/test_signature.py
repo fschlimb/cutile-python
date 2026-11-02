@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import cuda.tile as ct
-from cuda.tile._backend._signature import build_signature, constant_parameters
+from cuda.tile._backends._signature import build_signature, constant_parameters
 from cuda.tile.compilation import (
     ArrayConstraint, CallingConvention, ConstantConstraint, KernelSignature, ScalarConstraint)
 

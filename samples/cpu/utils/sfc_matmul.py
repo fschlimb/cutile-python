@@ -9,8 +9,8 @@ from dataclasses import replace
 
 import cuda.tile as ct
 import torch
-from cuda.tile._backend import compile_for_launch, launch_compiled
-from cuda.tile._backend._signature import build_signature
+from cuda.tile._backends import compile_for_launch, launch_compiled
+from cuda.tile._backends._signature import build_signature
 from cuda.tile.compilation import ArrayConstraint, KernelSignature
 
 

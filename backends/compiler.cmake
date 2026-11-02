@@ -10,6 +10,7 @@ find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(nanobind CONFIG REQUIRED)
 
 nanobind_add_module(_compiler FREE_THREADED compiler.cpp)
+target_include_directories(_compiler PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(_compiler SYSTEM PRIVATE
     "${LLVM_MAIN_SRC_DIR}/../mlir/include"
     "${LLVM_BINARY_DIR}/tools/mlir/include")
@@ -23,8 +24,7 @@ set_target_properties(_compiler PROPERTIES
     BUILD_WITH_INSTALL_RPATH TRUE)
 
 if(CUTILE_BUILD_VARIANT STREQUAL "cpu")
-    target_sources(_compiler PRIVATE cpu.cpp)
-    target_include_directories(_compiler PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../cpu")
+    target_sources(_compiler PRIVATE cpu/compiler_cpu.cpp)
     target_include_directories(_compiler SYSTEM PRIVATE
         "${LLVM_MAIN_SRC_DIR}/../lld/include")
     target_link_libraries(_compiler PRIVATE
@@ -41,7 +41,7 @@ else()
     if(NOT OCLOC_FOUND OR LLVM_BUILD_LLVM_DYLIB)
         message(FATAL_ERROR "The XPU compiler requires MLIR's in-process libocloc support")
     endif()
-    target_sources(_compiler PRIVATE xpu.cpp)
+    target_sources(_compiler PRIVATE xpu/compiler_xpu.cpp)
     target_include_directories(_compiler PRIVATE "${OCLOC_INCLUDE_DIR}")
     target_link_libraries(_compiler PRIVATE
         MLIRGPUPipelines MLIRXeVMTarget

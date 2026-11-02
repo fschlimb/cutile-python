@@ -7,7 +7,7 @@ import time
 from math import ceil
 
 import cuda.tile as ct
-from cuda.tile._backend import compile_for_launch, launch_compiled
+from cuda.tile._backends import compile_for_launch, launch_compiled
 
 
 _WARMUP_ITER_GUESS = 5

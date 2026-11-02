@@ -61,7 +61,7 @@ def identity_digest(identity: dict) -> str:
 
 
 def compiler(backend: str):
-    module = importlib.import_module("cuda.tile._backend._compiler")
+    module = importlib.import_module("cuda.tile._backends._compiler")
     if module.backend != backend:
         raise RuntimeError(
             f"The installed native compiler targets {module.backend}, not {backend}; "

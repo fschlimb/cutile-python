@@ -1,4 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights
+// reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -68,8 +69,8 @@ void Compilation::lowerTileIR(
     mlir::ModuleOp module, llvm::StringRef options,
     llvm::function_ref<void(mlir::OpPassManager &)> addBackendPasses) {
   module.walk([](mlir::Operation *op) {
-    auto rounding = op->getAttrOfType<mlir::cuda_tile::RoundingModeAttr>(
-        "rounding_mode");
+    auto rounding =
+        op->getAttrOfType<mlir::cuda_tile::RoundingModeAttr>("rounding_mode");
     if (!rounding)
       return;
     using Mode = mlir::cuda_tile::RoundingMode;
@@ -99,7 +100,8 @@ void Compilation::lowerTileIR(
   run(module, pm);
   // Nearest-even is arith's default, including for narrowing casts.
   module.walk([](mlir::Operation *op) {
-    auto rounding = op->getAttrOfType<mlir::arith::RoundingModeAttr>("roundingmode");
+    auto rounding =
+        op->getAttrOfType<mlir::arith::RoundingModeAttr>("roundingmode");
     if (rounding &&
         rounding.getValue() == mlir::arith::RoundingMode::to_nearest_even)
       op->removeAttr("roundingmode");

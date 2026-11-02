@@ -2,11 +2,17 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+# LLVM builds the compiler as an external project, separately from the launchers.
+if(TARGET TileIRToMLIR)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/compiler.cmake")
+    return()
+endif()
+
 # Builds the native parts of the non-CUDA backend selected by CUTILE_BUILD_VARIANT:
 # the native compiler and the backend's launcher extension. Installing
 # the build (`cmake --install <build> --prefix <site> --component cuTileBackend`)
-# stages them and their runtime files into <site>/cuda/tile/_backend, next to the
-# Python backend in src/cuda/tile/_backend.
+# stages them and their runtime files into <site>/cuda/tile/_backends, next to the
+# Python backend in src/cuda/tile/_backends.
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "The native CPU/XPU compilers currently support Linux only")
@@ -29,7 +35,7 @@ execute_process(
 find_package(nanobind CONFIG REQUIRED)
 
 # Package directory of the backends, relative to the install prefix.
-set(CUTILE_BACKEND_INSTALL_DIR cuda/tile/_backend)
+set(CUTILE_BACKEND_INSTALL_DIR cuda/tile/_backends)
 
 set(CUTILE_TILEIR_TO_MLIR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tileir-to-mlir")
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/TileIRToMLIR.cmake")

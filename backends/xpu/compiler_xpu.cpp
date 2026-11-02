@@ -1,4 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights
+// reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -100,8 +101,7 @@ static std::string compileXPU(llvm::StringRef bytecode,
   auto module = compilation.readTileIR(bytecode);
   compilation.lowerTileIR(
       *module,
-      "assume-in-bounds=" +
-          std::string(assumeInBounds ? "true" : "false") +
+      "assume-in-bounds=" + std::string(assumeInBounds ? "true" : "false") +
           " known-block-size=" + std::to_string(block[0]) + "," +
           std::to_string(block[1]) + "," + std::to_string(block[2]),
       [](mlir::OpPassManager &) {});
@@ -115,15 +115,15 @@ static std::string compileXPU(llvm::StringRef bytecode,
         llvm::any_of(function.getArgumentTypes(), [](mlir::Type type) {
           return mlir::isa<mlir::UnrankedMemRefType>(type);
         }))
-      throw std::invalid_argument(
-          "XPU backend: array accesses cannot be represented by the ranked-memref ABI");
+      throw std::invalid_argument("XPU backend: array accesses cannot be "
+                                  "represented by the ranked-memref ABI");
   });
   if (dumpIR)
     llvm::errs() << printModule(*module) << '\n';
-  std::string pipeline =
-      "gpu-lower-to-xevm-pipeline{enable-vector-to-xegpu=true use-64bit-index=true "
-      "xegpu-op-level=" +
-      opLevel + " zebin-chip=" + chip;
+  std::string pipeline = "gpu-lower-to-xevm-pipeline{enable-vector-to-xegpu="
+                         "true use-64bit-index=true "
+                         "xegpu-op-level=" +
+                         opLevel + " zebin-chip=" + chip;
   if (largeRegisters)
     pipeline += " igc-cmd-options=-ze-opt-large-register-file";
   pipeline += "}";
@@ -178,23 +178,23 @@ static std::string compilerIdentity() {
 void bindBackend(nanobind::module_ &module) {
   namespace nb = nanobind;
   using namespace nb::literals;
-  module.def("compile_xpu",
-             [](nb::bytes bytecode, const std::array<int32_t, 3> &block,
-                bool assumeInBounds, const std::string &opLevel,
-                bool largeRegisters, const std::string &chip, bool dumpIR,
-                const std::vector<int> &ranks) {
-               llvm::StringRef input(bytecode.c_str(), bytecode.size());
-               std::string binary;
-               {
-                 nb::gil_scoped_release release;
-                 binary = compileXPU(input, block, assumeInBounds, opLevel,
-                                     largeRegisters, chip, dumpIR, ranks);
-               }
-               return nb::bytes(binary.data(), binary.size());
-             },
-             "bytecode"_a, "block"_a, "assume_in_bounds"_a, "op_level"_a,
-             "large_register_file"_a, "chip"_a, "dump_ir"_a,
-             "parameter_ranks"_a = std::vector<int>{});
+  module.def(
+      "compile_xpu",
+      [](nb::bytes bytecode, const std::array<int32_t, 3> &block,
+         bool assumeInBounds, const std::string &opLevel, bool largeRegisters,
+         const std::string &chip, bool dumpIR, const std::vector<int> &ranks) {
+        llvm::StringRef input(bytecode.c_str(), bytecode.size());
+        std::string binary;
+        {
+          nb::gil_scoped_release release;
+          binary = compileXPU(input, block, assumeInBounds, opLevel,
+                              largeRegisters, chip, dumpIR, ranks);
+        }
+        return nb::bytes(binary.data(), binary.size());
+      },
+      "bytecode"_a, "block"_a, "assume_in_bounds"_a, "op_level"_a,
+      "large_register_file"_a, "chip"_a, "dump_ir"_a,
+      "parameter_ranks"_a = std::vector<int>{});
   module.def("xpu_identity", compilerIdentity,
              nb::call_guard<nb::gil_scoped_release>());
 }

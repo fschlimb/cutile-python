@@ -24,7 +24,7 @@ If permission is denied, schedule selection uses the x86 path without AMX.
 
 The compiler and TileIRToMLIR are LLVM external projects in the persistent
 build/llvm tree. Shared compiler invocation and timeout handling live in
-cuda.tile._backend._native. See backends/cpu/README.md for build and usage.
+cuda.tile._backends._native. See backends/cpu/README.md for build and usage.
 """
 
 from __future__ import annotations

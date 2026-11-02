@@ -10,7 +10,7 @@ import pytest
 
 
 def _load_benchmark():
-    path = (Path(__file__).resolve().parents[2]
+    path = (Path(__file__).resolve().parents[3]
             / "samples" / "cpu" / "utils" / "benchmark.py")
     spec = importlib.util.spec_from_file_location("cpu_sample_benchmark", path)
     module = importlib.util.module_from_spec(spec)

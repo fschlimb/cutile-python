@@ -22,7 +22,7 @@ are serialized; different kernels can run independently. Driver and launch
 failures raise RuntimeError with module build logs when available.
 The MLIR Level Zero runtime is neither built nor packaged.
 
-Shared compiler invocation and timeout handling live in cuda.tile._backend._native.
+Shared compiler invocation and timeout handling live in cuda.tile._backends._native.
 See backends/xpu/README.md for build, device selection, and usage.
 """
 import dataclasses

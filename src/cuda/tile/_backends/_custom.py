@@ -77,7 +77,7 @@ def _import_backend_module(module: str):
     # Support shorthand names (e.g. "xpu") for built-in backends.
     candidates = [module]
     if "." not in module:
-        candidates.insert(0, f"cuda.tile._backend.{module}")
+        candidates.insert(0, f"cuda.tile._backends.{module}")
 
     for name in candidates:
         try:

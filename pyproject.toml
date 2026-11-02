@@ -64,16 +64,16 @@ include = [
     "cuda.tile._passes",
     "cuda.tile._bytecode",
     "cuda.tile._library_lifecycle",
-    "cuda.tile._backend",
-    "cuda.tile._backend.cpu",
-    "cuda.tile._backend.xpu",
+    "cuda.tile._backends",
+    "cuda.tile._backends.cpu",
+    "cuda.tile._backends.xpu",
     "cuda.tile.tune",
     "cuda.tile.jax",
 ]
 
 [tool.setuptools.package-data]
 "cuda.tile" = ["VERSION", "_cext.pyi"]
-"cuda.tile._backend.cpu" = ["*.mlir"]
+"cuda.tile._backends.cpu" = ["*.mlir"]
 
 
 # Development environments of the non-CUDA variants, which build cuda-tile from

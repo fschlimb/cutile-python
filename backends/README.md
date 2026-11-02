@@ -79,17 +79,26 @@ cmake --install build --prefix src --component cuTileBackend
 
 For custom toolchain locations, LLVM revisions, or prebuilt compilers, see the
 build notes at the top of the
-[shared native compiler module](../src/cuda/tile/_backend/_native.py).
+[shared native compiler module](../src/cuda/tile/_backends/_native.py).
 
 ## Implement a backend
 
+Native sources are organized by backend: `cpu/` and `xpu/` each contain
+`compiler_<backend>.cpp`, `launcher_<backend>.cpp`, and a `test/` directory.
+Shared compiler sources (`compiler.cpp` and `compiler.h`) and compiler build
+rules (`compiler.cmake`) live directly in this directory; shared tests live in
+`test/`.
+
+Run all backend tests with `python -m pytest backends`, or select
+`backends/cpu/test`, `backends/xpu/test`, or `backends/test` for a subset.
+
 A custom backend is a module or object implementing the
-[`Backend` protocol](../src/cuda/tile/_backend/_custom.py), selected with
+[`Backend` protocol](../src/cuda/tile/_backends/_custom.py), selected with
 `ct.set_backend(backend)`. Signature construction and binary caching are shared;
 the backend supplies option validation, compilation, loading, launching, and
 synchronization.
 
 Implementation details are documented in the
-[CPU entry module](../src/cuda/tile/_backend/cpu/__init__.py),
-[XPU entry module](../src/cuda/tile/_backend/xpu/__init__.py), and
-[shared native compiler module](../src/cuda/tile/_backend/_native.py).
+[CPU entry module](../src/cuda/tile/_backends/cpu/__init__.py),
+[XPU entry module](../src/cuda/tile/_backends/xpu/__init__.py), and
+[shared native compiler module](../src/cuda/tile/_backends/_native.py).

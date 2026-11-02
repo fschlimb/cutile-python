@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, ContextManager, Generic, Sequence, TypeVar
 
-from cuda.tile import _backend
+from cuda.tile import _backends as _backend
 from cuda.tile._cext import _benchmark
 from cuda.tile._execution import kernel as TileKernel
 from cuda.tile.tune._tune_utils import benchmark_with_timeout

@@ -10,13 +10,13 @@ import sys
 
 import pytest
 
-_SAMPLES = sorted((Path(__file__).resolve().parents[2] / "samples" / "cpu").glob("*-cpu.py"))
+_SAMPLES = sorted((Path(__file__).resolve().parents[3] / "samples" / "cpu").glob("*-cpu.py"))
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _native_cpu():
-    pytest.importorskip("cuda.tile._backend.cpu._cpu")
-    compiler = pytest.importorskip("cuda.tile._backend._compiler")
+    pytest.importorskip("cuda.tile._backends.cpu._cpu")
+    compiler = pytest.importorskip("cuda.tile._backends._compiler")
     if compiler.backend != "cpu":
         pytest.skip("requires the native CPU compiler")
 

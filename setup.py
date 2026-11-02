@@ -16,10 +16,10 @@ is_windows = sys.platform == "win32"
 
 # Every build variant builds the _cext extension. The non-CUDA variants (see
 # backends/README.md) also build their backend from backends/ and stage it, with
-# its runtime files, into cuda/tile/_backend with `cmake --install`.
+# its runtime files, into cuda/tile/_backends with `cmake --install`.
 _backend_extensions = {
-    "cpu": "cuda.tile._backend.cpu._cpu",
-    "xpu": "cuda.tile._backend.xpu._level_zero",
+    "cpu": "cuda.tile._backends.cpu._cpu",
+    "xpu": "cuda.tile._backends.xpu._level_zero",
 }
 build_variant = os.getenv("CUTILE_BUILD_VARIANT", "cuda")
 if build_variant != "cuda" and build_variant not in _backend_extensions:
