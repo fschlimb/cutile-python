@@ -8,6 +8,7 @@ from setuptools.extension import Extension
 import os
 import shlex
 import sys
+import tempfile
 
 
 project_root = os.path.dirname(os.path.realpath(__file__))
@@ -131,9 +132,22 @@ class BuildExtWithCmake(build_ext):
             else:
                 ext_build_path = os.path.join(build_dir, src_dir, ext_name)
             ext_path = self.get_ext_fullpath(ext.name)
-            # Create a symlink to the build directory if in editable mode, otherwise copy
-            link = "sym" if self.editable_mode else None
-            file_util.copy_file(ext_build_path, ext_path, update=1, link=link)
+            if self.editable_mode:
+                _link_editable_extension(ext_build_path, ext_path)
+            else:
+                file_util.copy_file(ext_build_path, ext_path, update=1)
+
+
+def _link_editable_extension(src: str, dst: str):
+    src = os.path.abspath(src)
+    if not os.path.isfile(src):
+        raise FileNotFoundError(src)
+    if os.path.islink(dst) and os.readlink(dst) == src:
+        return
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(dst)) as temp_dir:
+        link = os.path.join(temp_dir, os.path.basename(dst))
+        os.symlink(src, link)
+        os.replace(link, dst)
 
 
 def _get_csrc_dir(ext_name: str):
