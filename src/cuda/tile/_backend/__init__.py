@@ -11,17 +11,16 @@ the enclosing :func:`cuda.tile.backend_options` block. Signature derivation,
 in-memory and on-disk caching are shared by all backends.
 
 A backend is a module or object implementing the :class:`Backend` protocol.
-Launches with an array argument on a CUDA device always run on CUDA.
+Selection is process-wide and independent of arguments. Call
+``cuda.tile.set_backend(None)`` to launch on CUDA.
 """
 
 from ._custom import (
     Backend,
     CompiledKernel,
-    backend_for,
     backend_options,
     benchmark,
     benchmark_callable,
-    clear_backend,
     compile_for_launch,
     current_options,
     get_backend,
@@ -35,11 +34,9 @@ __all__ = (
     "ArrayArgument",
     "Backend",
     "CompiledKernel",
-    "backend_for",
     "backend_options",
     "benchmark",
     "benchmark_callable",
-    "clear_backend",
     "compile_for_launch",
     "current_options",
     "get_backend",

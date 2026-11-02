@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import contextlib
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass
 import gc
 import importlib
 import logging
@@ -93,11 +93,11 @@ def _import_backend_module(module: str):
 
 
 def set_backend(backend) -> None:
-    """Select the backend that runs :func:`cuda.tile.launch` for non-CUDA arrays.
+    """Select the backend that runs :func:`cuda.tile.launch`.
 
-    The selection is process-wide. Launches with an array argument on a CUDA
-    device still run on CUDA, so other users of cuTile in the process are not
-    affected. :func:`backend_options` blocks apply to the current thread.
+    The selection is process-wide and is not inferred from kernel arguments.
+    Callers must coordinate backend changes across threads.
+    :func:`backend_options` blocks apply to the current thread.
 
     Args:
         backend: A :class:`Backend` module (or object) or its name. Short names
@@ -116,11 +116,6 @@ def set_backend(backend) -> None:
                 f"{', '.join(missing)}")
         hash(backend)  # identifies cached binaries
     _backend = backend
-
-
-def clear_backend() -> None:
-    """Restore the default CUDA path."""
-    set_backend(None)
 
 
 def get_backend():
@@ -248,32 +243,6 @@ def _runtime_arguments(args, constants, arrays) -> tuple:
                  if not constant)
 
 
-def _contains_cuda(value, seen: set[int]) -> bool:
-    if hasattr(value, "__cuda_array_interface__"):
-        return True
-    if callable(getattr(value, "data_ptr", None)):
-        device = getattr(value, "device", None)
-        return getattr(device, "type", device) == "cuda"
-    if isinstance(value, (tuple, list)):
-        children = value
-    elif is_dataclass(value) and not isinstance(value, type):
-        children = (getattr(value, field.name) for field in fields(value))
-    else:
-        return False
-    if id(value) in seen:
-        return False
-    seen.add(id(value))
-    return any(_contains_cuda(child, seen) for child in children)
-
-
-def _on_cuda(args, arrays) -> bool:
-    """Whether any argument, including an aggregate, contains a CUDA array."""
-    seen = set()
-    return any(_contains_cuda(value, seen) if array is None
-               else array.device == "cuda"
-               for value, array in zip(args, arrays))
-
-
 def _compile_for_launch(backend, kernel, cache, args, arrays, signature_builder):
     options = _normalized_options(backend)
     key = (backend, options, signature_builder,
@@ -301,17 +270,6 @@ def _active_backend():
     if backend is None:
         raise RuntimeError("no backend is active; see cuda.tile.set_backend()")
     return backend
-
-
-def backend_for(kernel, kernel_args):
-    """The backend :func:`launch` runs ``kernel`` on for ``kernel_args``, or
-    ``None`` for CUDA."""
-    backend = _backend
-    if backend is None:
-        return None
-    args = tuple(kernel_args)
-    return None if _on_cuda(args, _describe(_kernel_cache(kernel).constants, args)) \
-        else backend
 
 
 def compile_for_launch(kernel, args, *, signature_builder=build_signature):
@@ -386,8 +344,8 @@ def _compile_binary(kernel, backend, signature, options):
 def launch(stream, grid, kernel, kernel_args, /, **options):
     """Launch a cuTile kernel.
 
-    Runs on CUDA, or on the backend selected with :func:`cuda.tile.set_backend`
-    if no array argument is on a CUDA device.
+    Runs on the backend selected with :func:`cuda.tile.set_backend`, or on CUDA
+    if no backend is selected. Arguments never override the selection.
 
     Args:
         stream: The stream to execute the |kernel| on.
@@ -405,8 +363,6 @@ def launch(stream, grid, kernel, kernel_args, /, **options):
     args = tuple(kernel_args)
     cache = _kernel_cache(kernel)
     arrays = _describe(cache.constants, args)
-    if _on_cuda(args, arrays):
-        return _cext_launch(stream, grid, kernel, args, **options)
     if options:
         raise TypeError(f"launch options {', '.join(map(repr, options))} are only "
                         f"supported on CUDA")

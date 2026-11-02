@@ -1,11 +1,15 @@
-// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights
+// reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include "amx.h"
 #include "compiler.h"
 #include "lld/Common/Driver.h"
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Conversion/TileIRToMLIR/Passes.h"
+#include "mlir/Conversion/VectorToSCF/VectorToSCF.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/Transforms/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Transform/Transforms/Passes.h"
@@ -26,6 +30,7 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/SubtargetFeature.h"
+#include "llvm/TargetParser/Triple.h"
 #include <dlfcn.h>
 #include <link.h>
 #include <mutex>
@@ -63,15 +68,75 @@ void registerBackendPasses() {
         "cuTile compiler: native LLVM target is unavailable");
 }
 
+static llvm::StringRef cpuTransformEntryPoint() {
+  static const char *entryPoint = [] {
+    if (llvm::Triple(llvm::sys::getProcessTriple()).getArch() !=
+        llvm::Triple::x86_64)
+      return "__transform_nano";
+    return cutile::cpu::enableAMX() ? "__transform_nano_amx"
+                                    : "__transform_nano_x86";
+  }();
+  return entryPoint;
+}
+
 static std::unique_ptr<llvm::Module>
 lowerToLLVM(Compilation &compilation, mlir::ModuleOp module,
-            llvm::StringRef pipeline, llvm::LLVMContext &llvmContext) {
+            llvm::StringRef schedulePath, llvm::StringRef entryPoint,
+            llvm::LLVMContext &llvmContext) {
   mlir::PassManager pm(&compilation.context);
-  llvm::raw_string_ostream errors(compilation.diagnostics);
-  auto parsed = mlir::parsePassPipeline(pipeline, errors);
-  if (failed(parsed))
-    compilation.fail("parsing the CPU pipeline");
-  static_cast<mlir::OpPassManager &>(pm) = std::move(*parsed);
+
+  mlir::transform::PreloadLibraryPassOptions preloadOptions;
+  preloadOptions.transformLibraryPaths.push_back(schedulePath.str());
+  pm.addPass(
+      mlir::transform::createPreloadLibraryPass(std::move(preloadOptions)));
+  mlir::transform::InterpreterPassOptions interpreterOptions;
+  interpreterOptions.entryPoint =
+      (entryPoint.empty() ? cpuTransformEntryPoint() : entryPoint).str();
+  pm.addPass(
+      mlir::transform::createInterpreterPass(std::move(interpreterOptions)));
+
+  pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::createLoopInvariantCodeMotionPass());
+  pm.addPass(mlir::createCSEPass());
+  pm.addPass(mlir::createSymbolDCEPass());
+  pm.nest<mlir::func::FuncOp>().addPass(
+      mlir::vector::createLowerVectorMultiReductionPass(
+          mlir::vector::VectorMultiReductionLowering::InnerReduction));
+  pm.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
+  pm.addPass(mlir::memref::createExpandStridedMetadataPass());
+  pm.addPass(mlir::createCanonicalizerPass());
+
+  mlir::VectorTransferToSCFOptions vectorToSCFOptions;
+  vectorToSCFOptions.enableFullUnroll().setTargetRank(1);
+  pm.addPass(mlir::createConvertVectorToSCFPass(vectorToSCFOptions));
+  pm.addPass(mlir::createLowerAffinePass());
+  pm.addPass(mlir::createFinalizeMemRefToLLVMConversionPass());
+  pm.addPass(mlir::createSCFToControlFlowPass());
+  pm.addPass(mlir::createConvertIndexToLLVMPass());
+
+  mlir::ConvertVectorToLLVMPassOptions vectorToLLVMOptions;
+  vectorToLLVMOptions.reassociateFPReductions = true;
+  vectorToLLVMOptions.vectorContractLowering =
+      mlir::vector::VectorContractLowering::OuterProduct;
+  pm.addPass(
+      mlir::createConvertVectorToLLVMPass(std::move(vectorToLLVMOptions)));
+
+  mlir::math::MathExpandOpsPassOptions mathExpandOptions;
+  mathExpandOptions.opMnemonics.push_back("fpowi");
+  pm.addPass(mlir::math::createMathExpandOpsPass(std::move(mathExpandOptions)));
+  mlir::ConvertMathToLLVMPassOptions mathToLLVMOptions;
+  mathToLLVMOptions.approximateLog1p = true;
+  pm.addPass(mlir::createConvertMathToLLVMPass(std::move(mathToLLVMOptions)));
+  pm.addPass(mlir::createConvertMathToLibmPass());
+  pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+  pm.addPass(mlir::createArithToLLVMConversionPass());
+  pm.addPass(mlir::createUBToLLVMConversionPass());
+  pm.addPass(mlir::createConvertToLLVMPass());
+  pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+  pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::createCSEPass());
+  pm.addPass(mlir::createSymbolDCEPass());
+
   compilation.run(module, pm);
   auto result = mlir::translateModuleToLLVMIR(module, llvmContext);
   if (!result)
@@ -157,7 +222,7 @@ static std::string linkObject(llvm::StringRef object,
 }
 
 static std::string compileCPU(llvm::StringRef bytecode,
-                              llvm::StringRef pipeline, bool assumeInBounds,
+                              llvm::StringRef schedulePath, bool assumeInBounds,
                               llvm::StringRef directory,
                               llvm::StringRef dumpPath, bool printIR,
                               bool packArguments) {
@@ -179,7 +244,8 @@ static std::string compileCPU(llvm::StringRef bytecode,
   if (!dumpPath.empty())
     writeFile(dumpPath, printModule(*module));
   llvm::LLVMContext llvmContext;
-  auto llvmModule = lowerToLLVM(compilation, *module, pipeline, llvmContext);
+  auto llvmModule =
+      lowerToLLVM(compilation, *module, schedulePath, {}, llvmContext);
   auto triple = llvm::sys::getProcessTriple();
   std::string error;
   auto *target =
@@ -229,36 +295,41 @@ void bindBackend(nanobind::module_ &module) {
   using namespace nb::literals;
   module.def(
       "compile_cpu",
-      [](nb::bytes bytecode, const std::string &pipeline, bool assumeInBounds,
-         const std::string &directory, const std::string &dumpPath,
-         bool printIR, bool packArguments) {
+      [](nb::bytes bytecode, const std::string &schedulePath,
+         bool assumeInBounds, const std::string &directory,
+         const std::string &dumpPath, bool printIR, bool packArguments) {
         llvm::StringRef input(bytecode.c_str(), bytecode.size());
         std::string binary;
         {
           nb::gil_scoped_release release;
-          binary = compileCPU(input, pipeline, assumeInBounds, directory,
+          binary = compileCPU(input, schedulePath, assumeInBounds, directory,
                               dumpPath, printIR, packArguments);
         }
         return nb::bytes(binary.data(), binary.size());
       },
-      "bytecode"_a, "pipeline"_a, "assume_in_bounds"_a, "directory"_a,
+      "bytecode"_a, "schedule_path"_a, "assume_in_bounds"_a, "directory"_a,
       "dump_path"_a = "", "print_ir"_a = false, "pack_arguments"_a = true);
-  module.def("lower_cpu_mlir",
-             [](nb::bytes source, const std::string &pipeline) {
-               llvm::StringRef input(source.c_str(), source.size());
-               std::string result;
-               {
-                 nb::gil_scoped_release release;
-                 Compilation compilation;
-                 auto module = compilation.readMLIR(input);
-                 llvm::LLVMContext llvmContext;
-                 auto llvmModule =
-                     lowerToLLVM(compilation, *module, pipeline, llvmContext);
-                 llvm::raw_string_ostream stream(result);
-                 llvmModule->print(stream, nullptr);
-               }
-               return nb::bytes(result.data(), result.size());
-             });
+  module.def(
+      "lower_cpu_mlir",
+      [](nb::bytes source, const std::string &schedulePath,
+         const std::string &entryPoint) {
+        llvm::StringRef input(source.c_str(), source.size());
+        std::string result;
+        {
+          nb::gil_scoped_release release;
+          Compilation compilation;
+          auto module = compilation.readMLIR(input);
+          llvm::LLVMContext llvmContext;
+          auto llvmModule = lowerToLLVM(compilation, *module, schedulePath,
+                                        entryPoint, llvmContext);
+          llvm::raw_string_ostream stream(result);
+          llvmModule->print(stream, nullptr);
+        }
+        return nb::bytes(result.data(), result.size());
+      },
+      "source"_a, "schedule_path"_a, "entry_point"_a = "");
+  module.def("cpu_transform_entry_point",
+             [] { return cpuTransformEntryPoint().str(); });
 }
 
 } // namespace cutile

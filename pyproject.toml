@@ -89,7 +89,6 @@ backend-build = [
     "ninja",
     "nanobind>=2.9,<3",
     "pybind11>=2.13.1",
-    "patchelf; sys_platform == 'linux'",
     # CUDA headers for building _cext without a CUDA Toolkit.
     "cuda-toolkit[cudart,nvvm]>=13.2,<13.6; sys_platform == 'linux'",
 ]

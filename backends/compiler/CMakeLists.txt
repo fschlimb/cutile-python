@@ -20,11 +20,11 @@ target_link_libraries(_compiler PRIVATE
 target_link_options(_compiler PRIVATE "LINKER:--exclude-libs,ALL")
 set_target_properties(_compiler PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${LLVM_BINARY_DIR}/lib"
-    BUILD_WITH_INSTALL_RPATH TRUE
-    INSTALL_RPATH "$ORIGIN/_lib")
+    BUILD_WITH_INSTALL_RPATH TRUE)
 
 if(CUTILE_BUILD_VARIANT STREQUAL "cpu")
     target_sources(_compiler PRIVATE cpu.cpp)
+    target_include_directories(_compiler PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../cpu")
     target_include_directories(_compiler SYSTEM PRIVATE
         "${LLVM_MAIN_SRC_DIR}/../lld/include")
     target_link_libraries(_compiler PRIVATE

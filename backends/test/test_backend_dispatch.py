@@ -14,7 +14,7 @@ import pytest
 import cuda.tile as ct
 from cuda.tile import _backend
 from cuda.tile._backend import ArrayArgument, _custom
-from cuda.tile._backend._signature import build_signature
+from cuda.tile._backend._signature import build_signature, check_argument
 
 
 @ct.kernel
@@ -78,7 +78,7 @@ def backend():
     backend = _Backend()
     _backend.set_backend(backend)
     yield backend
-    _backend.clear_backend()
+    _backend.set_backend(None)
     _kernel.__dict__.pop("_cutile_backend_cache", None)
 
 
@@ -381,44 +381,63 @@ class _Pair:
     right: object
 
 
-@pytest.mark.parametrize("array", [_CudaArray(), _CudaTensor()])
-def test_cuda_arrays_bypass_the_backend(frontend, backend, cuda_launches, array):
-    ct.launch(None, (1,), _kernel, (array, 1.0, 4), programmatic_dependent_launch=True)
+def test_cuda_tensor_uses_selected_backend(frontend, backend, cuda_launches):
+    tensor = _CudaTensor()
+    ct.launch(None, (1,), _kernel, (tensor, 1.0, 4))
 
-    assert cuda_launches[0][1] == {"programmatic_dependent_launch": True}
-    assert _backend.backend_for(_kernel, (array, 1.0, 4)) is None
-    assert _backend.backend_for(_kernel, _args()) is backend
-    assert "compile" not in backend.calls
+    assert cuda_launches == []
+    assert backend.launched_args == (_custom.array_metadata(tensor), 1.0)
+    assert backend.calls.count("compile") == 1
+
+
+def test_incompatible_device_raises_without_cuda_fallback(
+        frontend, backend, cuda_launches, monkeypatch):
+    def launch(loaded, stream, grid, args):
+        signature = build_signature(_kernel, _args())
+        check_argument("test", "cpu", signature.parameters[0], args[0])
+
+    monkeypatch.setattr(backend, "launch", launch)
+    with pytest.raises(ValueError, match="device 'cuda', expected 'cpu'"):
+        ct.launch(None, (1,), _kernel, (_CudaTensor(), 1.0, 4))
+    assert cuda_launches == []
+
+
+def test_explicit_backend_switching(frontend, backend, cuda_launches):
+    cpu_args = _args()
+    cuda_args = (_CudaTensor(), 1.0, 4)
+    ct.launch(None, (1,), _kernel, cpu_args)
+
+    ct.set_backend(None)
+    assert _backend.get_backend() is None
+    ct.launch(None, (1,), _kernel, cuda_args, programmatic_dependent_launch=True)
+
+    _backend.set_backend(backend)
+    ct.launch(None, (2,), _kernel, cpu_args)
+
+    assert cuda_launches == [
+        ((None, (1,), _kernel, cuda_args), {"programmatic_dependent_launch": True})]
+    assert backend.calls.count("compile") == 1
+    assert [call[2] for call in backend.calls if call[0] == "launch"] == [(1,), (2,)]
 
 
 @pytest.mark.parametrize("array", [_CudaArray(), _CudaTensor()])
 @pytest.mark.parametrize("wrap", [
+    lambda array: array,
     lambda array: (array,),
     lambda array: [array],
     lambda array: [(0, [array])],
     lambda array: _Pair(0, (array,)),
 ])
-def test_nested_cuda_arrays_bypass_the_backend(
+def test_cuda_arguments_do_not_enable_cuda_launch_options(
         frontend, backend, cuda_launches, array, wrap):
     args = (wrap(array), 1.0, 4)
-    ct.launch(None, (1,), _kernel, args, programmatic_dependent_launch=True)
-    assert cuda_launches == [
-        ((None, (1,), _kernel, args), {"programmatic_dependent_launch": True})]
-    assert _backend.backend_for(_kernel, args) is None
+    with pytest.raises(TypeError, match="only supported on CUDA"):
+        ct.launch(None, (1,), _kernel, args, programmatic_dependent_launch=True)
+    assert cuda_launches == []
     assert "compile" not in backend.calls
 
 
-def test_cuda_dispatch_handles_cyclic_containers(frontend, backend, cuda_launches):
-    values = []
-    values.extend((values, _CudaTensor()))
-    ct.launch(None, (1,), _kernel, (values, 1.0, 4))
-    assert len(cuda_launches) == 1
-    values.pop()
-    with pytest.raises(TypeError, match="only supported on CUDA"):
-        ct.launch(None, (1,), _kernel, (values, 1.0, 4))
-
-
-def test_cuda_tuning_timeout_is_allowed_with_a_backend_selected(
+def test_cuda_tuning_timeout_is_allowed_after_clearing_backend(
         backend, monkeypatch):
     from cuda.tile.tune import _tune
 
@@ -426,6 +445,7 @@ def test_cuda_tuning_timeout_is_allowed_with_a_backend_selected(
     monkeypatch.setattr(_tune, "_benchmark", lambda *args: 1.0)
     monkeypatch.setattr(_tune, "benchmark_with_timeout",
                         lambda *args: calls.append(args))
+    _backend.set_backend(None)
     result = ct.tune.exhaustive_search(
         [4], None, lambda _: (1,), _kernel,
         lambda value: (_CudaTensor(), 1.0, value),
@@ -434,17 +454,54 @@ def test_cuda_tuning_timeout_is_allowed_with_a_backend_selected(
     assert len(calls) == 1
 
 
-def test_backend_tuning_timeout_is_rejected(backend):
+@pytest.mark.parametrize("array", [np.zeros(16, dtype=np.float32), _CudaTensor()])
+def test_backend_tuning_timeout_is_rejected(backend, array):
     with pytest.raises(ValueError, match="not supported by custom backends"):
         ct.tune.exhaustive_search(
             [4], None, lambda _: (1,), _kernel,
-            lambda value: _args(value=value),
+            lambda value: (array, 1.0, value),
             single_run_timeout_sec=1, quiet=True)
 
 
 def test_backends_reject_cuda_launch_options(frontend, backend):
     with pytest.raises(TypeError, match="only supported on CUDA"):
         ct.launch(None, (1,), _kernel, _args(), programmatic_dependent_launch=True)
+
+
+@pytest.mark.parametrize("use_cuda", [False, True])
+def test_tuning_benchmark_uses_selected_backend(backend, monkeypatch, use_cuda):
+    from cuda.tile.tune import _tune
+
+    calls = []
+    monkeypatch.setattr(_backend, "benchmark",
+                        lambda *args: (calls.append("backend") or 2.0))
+    monkeypatch.setattr(_tune, "_benchmark",
+                        lambda *args: (calls.append("cuda") or 1.0))
+    if use_cuda:
+        _backend.set_backend(None)
+
+    elapsed = _tune._benchmark_launch(
+        None, (1,), _kernel, (_CudaTensor(), 1.0, 4), False)
+
+    assert calls == ["cuda" if use_cuda else "backend"]
+    assert elapsed == (1.0 if use_cuda else 2.0)
+
+
+def test_autotune_prepare_follows_explicit_backend_switch(
+        frontend, backend, cuda_launches):
+    tuned = ct.autotune(configs=[{"value": 4}], grid=(1,))(_kernel)
+    args = (_CudaTensor(), 1.0)
+
+    tuned.prepare(None, args)
+    tuned.launch_prepared(None)
+    assert backend.launched_args == (_custom.array_metadata(args[0]), 1.0)
+    assert cuda_launches == []
+
+    _backend.set_backend(None)
+    tuned.prepare(None, args)
+    tuned.launch_prepared(None)
+    assert len(cuda_launches) == 1
+    assert cuda_launches[0][0][3] == (*args, 4)
 
 
 def test_autotune_compiles_each_config_once(frontend, backend):

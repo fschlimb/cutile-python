@@ -162,7 +162,7 @@ def test_invalid_bytecode_does_not_poison_compiler(native, tmp_path):
     if native.backend != "cpu":
         pytest.skip("requires the CPU compiler")
     with pytest.raises(ValueError, match="invalid TileIR"):
-        native.compile_cpu(b"invalid", cpu._lowering_pipeline(), False, str(tmp_path))
+        native.compile_cpu(b"invalid", cpu._TRANSFORM_SCHEDULE, False, str(tmp_path))
     bytecode, signature = _bytecode(_empty, (), cpu)
     assert cpu.compile(bytecode, signature, cpu.Options(False)).startswith(b"\x7fELF")
 
@@ -171,7 +171,7 @@ def test_native_mlir_errors_include_diagnostics(native):
     if native.backend != "cpu":
         pytest.skip("requires the CPU compiler")
     with pytest.raises(RuntimeError, match="parsing MLIR"):
-        native.lower_cpu_mlir(b"not MLIR", cpu._lowering_pipeline())
+        native.lower_cpu_mlir(b"not MLIR", cpu._TRANSFORM_SCHEDULE)
 
 
 def _divide_with_rounding(mode):
@@ -254,7 +254,7 @@ from cuda.tile._backend import _compiler
 from cuda.tile._backend import cpu
 with tempfile.TemporaryDirectory() as directory:
     sys.stdout.buffer.write(_compiler.compile_cpu(
-        sys.stdin.buffer.read(), cpu._lowering_pipeline(), False, directory))
+        sys.stdin.buffer.read(), cpu._TRANSFORM_SCHEDULE, False, directory))
 """
 
 
@@ -297,12 +297,14 @@ def test_native_errors_are_consistent_with_and_without_worker(
         pytest.skip("requires the CPU compiler")
     monkeypatch.setattr(default_tile_context.config, "compiler_timeout_sec", timeout)
     with pytest.raises(ValueError, match="invalid TileIR bytecode") as caught:
-        _native.invoke("cpu", "compile_cpu", b"invalid", cpu._lowering_pipeline(),
+        _native.invoke("cpu", "compile_cpu", b"invalid", cpu._TRANSFORM_SCHEDULE,
                        False, str(tmp_path))
     assert "Traceback" not in str(caught.value)
     bytecode, _ = _bytecode(_empty, (), cpu)
-    with pytest.raises(RuntimeError, match="parsing the CPU pipeline") as caught:
-        _native.invoke("cpu", "compile_cpu", bytecode, "builtin.module(not-a-pass)",
+    bad_schedule = tmp_path / "invalid-schedule.mlir"
+    bad_schedule.write_text("not MLIR")
+    with pytest.raises(RuntimeError, match="running the pass pipeline") as caught:
+        _native.invoke("cpu", "compile_cpu", bytecode, str(bad_schedule),
                        False, str(tmp_path))
     assert "Traceback" not in str(caught.value)
 

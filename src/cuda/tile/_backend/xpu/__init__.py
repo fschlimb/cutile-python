@@ -3,19 +3,27 @@
 # SPDX-License-Identifier: Apache-2.0
 """cuTile backend targeting Intel XPUs through XeGPU and Level Zero.
 
-Compilation runs TileIRToMLIR and XeVM passes in the private native compiler;
-the resulting device binary is launched through the native
-:mod:`cuda.tile._backend.xpu._level_zero` extension with checked Level Zero calls.
+TileIRToMLIR and XeVM passes run in the private native compiler, linked against
+LLVM/MLIR and TileIRToMLIR through nanobind. Device-code generation calls
+libocloc in-process and is serialized because its thread safety is undocumented.
+Installed kernels need no LLVM tools or MLIR Python bindings.
 
-Select the backend and, optionally, tune the launch block::
-
-    ct.set_backend("xpu")
-    with ct.backend_options({"wg_m": 128, "wg_n": 128, "sg_m": 32, "sg_n": 32}):
-        ct.launch(stream, grid, matmul_kernel, args)
+Array parameters use a uniform ranked-memref ABI, including unused arrays and
+arrays used only for shape or strides. Offsets, sizes, and strides are 64-bit.
+Compilation rejects access patterns that cannot be represented by this ABI.
+The launch block derived from tile sizes is
+((wg_m // sg_m) * (wg_n // sg_n) * 16, 1, 1) and is baked into the binary.
 
 Kernels run synchronously on Level Zero device 0 (``xpu:0``), in a private
-Level Zero context rather than the caller's; select the device with
-``ZE_AFFINITY_MASK``.
+context rather than the caller's. The native _level_zero extension waits for
+the caller's stream before launching and checks Level Zero calls. Each compiled
+kernel owns its module, kernel, and command list. Launches of the same kernel
+are serialized; different kernels can run independently. Driver and launch
+failures raise RuntimeError with module build logs when available.
+The MLIR Level Zero runtime is neither built nor packaged.
+
+Shared compiler invocation and timeout handling live in cuda.tile._backend._native.
+See backends/xpu/README.md for build, device selection, and usage.
 """
 import dataclasses
 import functools

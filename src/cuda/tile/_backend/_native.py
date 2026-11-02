@@ -1,7 +1,35 @@
 # SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
-"""The native compiler shared by the built-in backends."""
+"""The native compiler shared by the built-in backends.
+
+The private nanobind extension links the pinned LLVM/MLIR and TileIRToMLIR
+libraries. In-process compilation releases the GIL and uses a fresh MLIR context
+per call. An explicit compiler timeout selects a Python worker running the same
+extension so a timeout can terminate compilation safely. Without a timeout,
+native compiler crashes affect the calling process.
+
+The worker preserves known ValueError and RuntimeError failures without an
+additional worker traceback. Installed kernels do not invoke LLVM tools or
+require MLIR Python bindings. LLVM/MLIR assertions are disabled by default;
+CMAKE_ARGS=-DCUTILE_LLVM_ENABLE_ASSERTIONS=ON enables them for debugging.
+
+Build configuration
+-------------------
+The backends/tileir-to-mlir submodule pins TileIRToMLIR; its llvm-revision.txt
+defines the required LLVM commit. USE_LLVM_REVISION may select a newer
+descendant, but older or divergent commits are rejected. CMAKE_ARGS accepts
+CUTILE_LLVM_SOURCE_DIR and CUTILE_LLVM_BINARY_DIR for custom build locations.
+CUDAToolkit_ROOT selects local CUDA headers instead of the build dependencies.
+
+To reuse a prebuilt compiler, pass
+CMAKE_ARGS="-DCUTILE_TOOLCHAIN_DIR=/path/to/prefix" to the backend's uv sync
+command. The prefix must match the required LLVM revision, active Python
+version, and build variant. It must contain lib/_compiler<EXT_SUFFIX> and
+share/cutile/llvm/LICENSE.TXT; the cuTileCompiler CMake install component
+stages both. Consuming the prefix needs neither an LLVM checkout nor network
+access.
+"""
 
 import hashlib
 import importlib

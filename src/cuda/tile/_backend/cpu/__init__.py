@@ -1,12 +1,36 @@
 # SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
+"""CPU backend: native compilation and synchronous OpenMP execution.
+
+TileIRToMLIR and MLIR passes, LLVM optimization and object emission, and the
+LLD ELF linker run through C++ APIs in the private native compiler. Shared
+libraries use cuTile's binary cache. Installed kernels need no LLVM tools or
+MLIR Python bindings.
+
+TileIRToMLIR emits a uniform ABI: a pointer to immutable eight-byte argument
+slots followed by six i32 block-id/grid-dimension arguments. A single
+nanobind/OpenMP launcher serves all kernels; no launcher is compiled per kernel.
+Blocks use static OpenMP scheduling without a grid-sized coordinate array.
+One worker and single-block grids bypass parallel dispatch.
+The launcher uses the system GCC OpenMP runtime (libgomp.so.1), not a bundled copy.
+
+Before general lowering, cpu_schedule.mlir selects generic patterns on any
+host, x86 contraction-loop preparation on x86-64, and AMX lowering only when
+AMX tile, BF16, and INT8 are available. Final LLVM conversion lowers AMX
+operations and loop-carried tile types together with control flow. On Linux
+x86-64, importing the launcher requests process-wide tile-data permission.
+If permission is denied, schedule selection uses the x86 path without AMX.
+
+The compiler and TileIRToMLIR are LLVM external projects in the persistent
+build/llvm tree. Shared compiler invocation and timeout handling live in
+cuda.tile._backend._native. See backends/cpu/README.md for build and usage.
+"""
 
 from __future__ import annotations
 
 import dataclasses
 import functools
-import json
 import operator
 import os
 import platform
@@ -29,43 +53,6 @@ name = "cpu"
 bytecode_version = BYTECODE_VERSION
 
 _TRANSFORM_SCHEDULE = os.path.join(os.path.dirname(__file__), "cpu_schedule.mlir")
-
-
-def _lowering_pipeline(entry_point: str | None = None) -> str:
-    """The MLIR pipeline lowering TileIRToMLIR output on this host."""
-    entry_point = entry_point or _transform_entry_point()
-    return f"""builtin.module(
-    transform-preload-library{{transform-library-paths={json.dumps(_TRANSFORM_SCHEDULE)}}},
-    transform-interpreter{{entry-point={entry_point}}},
-    canonicalize,
-    loop-invariant-code-motion,
-    cse,
-    symbol-dce,
-    func.func(lower-vector-multi-reduction{{lowering-strategy=inner-reduction}}),
-    fold-memref-alias-ops,
-    expand-strided-metadata,
-    canonicalize,
-    convert-vector-to-scf{{full-unroll=true target-rank=1 lower-tensors=false}},
-    lower-affine,
-    finalize-memref-to-llvm,
-    convert-scf-to-cf,
-    convert-index-to-llvm,
-    convert-vector-to-llvm{{
-        reassociate-fp-reductions=true
-        vector-contract-lowering=outerproduct
-    }},
-    math-expand-ops{{ops=fpowi}},
-    convert-math-to-llvm{{approximate-log1p=true}},
-    convert-math-to-libm,
-    reconcile-unrealized-casts,
-    convert-arith-to-llvm,
-    convert-ub-to-llvm,
-    convert-to-llvm,
-    reconcile-unrealized-casts,
-    canonicalize,
-    cse,
-    symbol-dce
-)"""
 
 
 # Options of a ``backend_options`` block; ``num_cpu_threads`` only applies at launch.
@@ -106,10 +93,8 @@ def _amx_enabled() -> bool:
 
 
 def _transform_entry_point() -> str:
-    """The ``cpu_schedule.mlir`` entry point whose code the host can execute."""
-    if platform.machine() != "x86_64":
-        return "__transform_nano"
-    return "__transform_nano_amx" if _amx_enabled() else "__transform_nano_x86"
+    """The native compiler's schedule entry point for this host."""
+    return native_compiler("cpu").cpu_transform_entry_point()
 
 
 def compiler_identity(options: Options):
@@ -137,7 +122,7 @@ def compile(bytecode: bytes, signature, options: Options) -> bytes:
     del signature
     with tempfile.TemporaryDirectory() as directory:
         return invoke(
-            "cpu", "compile_cpu", bytecode, _lowering_pipeline(),
+            "cpu", "compile_cpu", bytecode, _TRANSFORM_SCHEDULE,
             options.assume_in_bounds, directory,
             os.environ.get("CUTILE_CPU_DUMP_MLIR", ""),
             os.environ.get("MLIR_ENABLE_DUMP") == "1")

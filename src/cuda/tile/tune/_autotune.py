@@ -288,7 +288,7 @@ class AutotunedKernel(_Autotuned):
         if len(self._configs) == 1:
             self._local.best = 0
             return 0
-        backend = _backend.backend_for(self._kernel, self._injectors[0](args))
+        backend = _backend.get_backend()
         if callable(self._options):
             environment = tuple(
                 _environment_key(backend, self._plan_for(index, args)[1])
@@ -314,7 +314,7 @@ class AutotunedKernel(_Autotuned):
         full_args = self._injectors[index](args)
         kernel = self._kernels[index]
         context_factory = self._options_context_factory(options)
-        if _backend.backend_for(kernel, full_args) is None:
+        if _backend.get_backend() is None:
             launch_fn, target = _backend.launch, kernel
         elif context_factory is None:
             launch_fn = _backend.launch_compiled

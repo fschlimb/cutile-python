@@ -73,7 +73,7 @@ def _fake_runtime(monkeypatch, events=None):
             return ()
 
     target = Backend()
-    monkeypatch.setattr(backend, "backend_for", lambda kernel, args: target)
+    monkeypatch.setattr(backend, "get_backend", lambda: target)
     monkeypatch.setattr(backend, "compile_for_launch", compile_kernel)
     monkeypatch.setattr(backend, "launch_compiled", launch_compiled)
     monkeypatch.setattr(backend, "backend_options", backend_options)

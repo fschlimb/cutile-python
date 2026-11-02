@@ -47,7 +47,7 @@ def test_xpu_module_is_a_backend():
     try:
         assert _backend.get_backend() is xpu
     finally:
-        _backend.clear_backend()
+        _backend.set_backend(None)
 
 
 def _runtime(kernel, args):

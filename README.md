@@ -11,8 +11,28 @@ or built from source located in the [docs](docs/) folder.
 Non-CUDA Backends
 -----------------
 
-Experimental CPU and Intel XPU backends are described in
-[backends/README.md](backends/README.md).
+Experimental CPU and Intel XPU backends are available on Linux. For a quick
+source build, install the prerequisites below, then run from the repository root:
+
+```bash
+git submodule update --init --recursive
+uv venv --python 3.12
+source .venv/bin/activate
+
+# Choose ONE backend:
+CUTILE_BUILD_VARIANT=cpu uv sync --group cpu --no-build-isolation-package cuda-tile
+CUTILE_BUILD_VARIANT=xpu uv sync --group xpu --no-build-isolation-package cuda-tile
+```
+
+- **CPU:** requires GCC with OpenMP, Clang, and LLD. See the
+  [CPU guide](backends/cpu/README.md) for prerequisites, sample runs, and usage.
+- **XPU:** requires Linux x86-64 and Intel GPU development software; initialize
+  the Intel environment **before building**. See the
+  [XPU guide](backends/xpu/README.md) for environment setup, sample runs, and usage.
+
+Neither build requires an NVIDIA GPU or CUDA driver. Each environment supports
+one build variant. See the [backend overview](backends/README.md) for runtime
+selection and shared behavior.
 
 Example
 -------

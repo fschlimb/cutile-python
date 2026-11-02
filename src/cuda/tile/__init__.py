@@ -179,7 +179,7 @@ from cuda.tile._context import compiler_timeout
 from cuda.tile import tune
 from cuda.tile.tune import autotune
 
-from cuda.tile._backend import launch, set_backend, clear_backend, backend_options
+from cuda.tile._backend import launch, set_backend, backend_options
 
 from cuda.tile._execution import (
     function,
@@ -191,7 +191,6 @@ import cuda.tile.compilation as compilation
 __all__ = [
     "launch",
     "set_backend",
-    "clear_backend",
     "backend_options",
 
     "ByTarget",
