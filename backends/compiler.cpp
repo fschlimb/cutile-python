@@ -17,6 +17,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include <cstdlib>
 #include <stdexcept>
 
 namespace cutile {
@@ -34,7 +35,12 @@ static mlir::DialectRegistry createRegistry() {
 
 Compilation::Compilation(bool printIR)
     : context(createRegistry(), mlir::MLIRContext::Threading::DISABLED),
-      printIR(printIR), handler(&context, [this](mlir::Diagnostic &diagnostic) {
+      printIR(printIR ||
+              [] {
+                const char *value = std::getenv("MLIR_ENABLE_DUMP");
+                return value && llvm::StringRef(value) == "1";
+              }()),
+      handler(&context, [this](mlir::Diagnostic &diagnostic) {
         llvm::raw_string_ostream stream(diagnostics);
         diagnostic.print(stream);
         stream << '\n';
