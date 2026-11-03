@@ -9,7 +9,7 @@ endif()
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(nanobind CONFIG REQUIRED)
 
-nanobind_add_module(_compiler FREE_THREADED compiler.cpp)
+nanobind_add_module(_compiler FREE_THREADED mlir/compiler.cpp)
 target_include_directories(_compiler PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(_compiler SYSTEM PRIVATE
     "${LLVM_MAIN_SRC_DIR}/../mlir/include"
@@ -17,23 +17,21 @@ target_include_directories(_compiler SYSTEM PRIVATE
 target_link_libraries(_compiler PRIVATE
     TileIRToMLIR CudaTileBytecodeReader
     MLIRParser MLIRTransforms MLIRRegisterAllDialects MLIRRegisterAllExtensions
-    MLIRBuiltinToLLVMIRTranslation MLIRLLVMToLLVMIRTranslation)
+    MLIRBuiltinToLLVMIRTranslation MLIRLLVMToLLVMIRTranslation
+    MLIRVectorTransforms)
+target_sources(_compiler PRIVATE mlir/LowerVectorScan.cpp)
 target_link_options(_compiler PRIVATE "LINKER:--exclude-libs,ALL")
 set_target_properties(_compiler PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${LLVM_BINARY_DIR}/lib"
     BUILD_WITH_INSTALL_RPATH TRUE)
 
 if(CUTILE_BUILD_VARIANT STREQUAL "cpu")
-    target_sources(_compiler PRIVATE cpu/compiler_cpu.cpp cpu/LowerVectorScan.cpp)
-    if(NOT LLVM_ENABLE_RTTI)
-        set_source_files_properties(cpu/LowerVectorScan.cpp PROPERTIES
-            COMPILE_OPTIONS "-fno-rtti")
-    endif()
+    target_sources(_compiler PRIVATE cpu/compiler_cpu.cpp)
     target_include_directories(_compiler SYSTEM PRIVATE
         "${LLVM_MAIN_SRC_DIR}/../lld/include")
     target_link_libraries(_compiler PRIVATE
         MLIRTransformDialectTransforms
-        MLIRMemRefTransforms MLIRVectorTransforms MLIRMathTransforms
+        MLIRMemRefTransforms MLIRMathTransforms
         MLIRAffineToStandard MLIRVectorToSCF
         MLIRSCFToControlFlow MLIRVectorToLLVMPass
         MLIRMathToLibm MLIRConvertToLLVMPass
@@ -51,6 +49,11 @@ else()
         MLIRGPUPipelines MLIRXeVMTarget
         MLIRGPUToLLVMIRTranslation
         "${OCLOC_LIBRARY}")
+endif()
+
+if(NOT LLVM_ENABLE_RTTI)
+    set_source_files_properties(mlir/LowerVectorScan.cpp PROPERTIES
+        COMPILE_OPTIONS "-fno-rtti")
 endif()
 
 install(TARGETS _compiler LIBRARY DESTINATION lib COMPONENT cuTileCompiler)

@@ -55,10 +55,17 @@ def cutile_matmul(A: torch.Tensor, B: torch.Tensor, options: dict,
     tn = 256
     tk = 32
 
-    # --- Get Matrix Dimensions ---
-    m, k_a = A.shape  # M = total rows of A (and C), K_A = total columns of A
-    k_b, n = B.shape  # K_B = total rows of B, N = total columns of B (and C)
-    # Note: k_a and k_b must be equal due to validation. This is the 'K' dimension.
+    m, k = A.shape
+    _, n = B.shape
+    output_shape = (m, n)
+    padded_m = ceil(m / tm) * tm
+    padded_n = ceil(n / tn) * tn
+    padded_k = ceil(k / tk) * tk
+    if (padded_m, padded_n, padded_k) != (m, n, k):
+        A = torch.nn.functional.pad(A, (0, padded_k - k, 0, padded_m - m))
+        B = torch.nn.functional.pad(B, (0, padded_n - n, 0, padded_k - k))
+    m, k = A.shape
+    _, n = B.shape
 
     # --- Calculate Grid Dimensions for Kernel Launch (1D Grid) ---
     # The grid defines how many blocks will be launched.
@@ -86,7 +93,7 @@ def cutile_matmul(A: torch.Tensor, B: torch.Tensor, options: dict,
     with ct.backend_options(options):
         ct.launch(torch.xpu.current_stream(), grid, kernel, (A, B, C, tm, tn, tk))
 
-    return C
+    return C[:output_shape[0], :output_shape[1]]
 
 
 if __name__ == "__main__":

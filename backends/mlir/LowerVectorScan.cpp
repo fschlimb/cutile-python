@@ -5,7 +5,8 @@
 
 #include "LowerVectorScan.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include <utility>
+
 #include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"

@@ -3,15 +3,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "compiler.h"
 #include "mlir/Conversion/TileIRToMLIR/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Pipelines/Passes.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/LowerVectorScan.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Target/LLVMIR/Dialect/GPU/GPUToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/XeVM/XeVMToLLVMIRTranslation.h"
+#include "mlir/compiler.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/TargetSelect.h"
@@ -104,7 +105,9 @@ static std::string compileXPU(llvm::StringRef bytecode,
       "assume-in-bounds=" + std::string(assumeInBounds ? "true" : "false") +
           " known-block-size=" + std::to_string(block[0]) + "," +
           std::to_string(block[1]) + "," + std::to_string(block[2]),
-      [](mlir::OpPassManager &) {});
+      [](mlir::OpPassManager &pm) {
+        pm.addPass(cutile::createLowerVectorScanPass());
+      });
   prepareArrayArguments(*module, ranks);
   mlir::PassManager promotion(&compilation.context);
   promotion.addPass(mlir::createConvertMemrefArgsToRankedMemrefPass(

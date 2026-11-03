@@ -29,7 +29,8 @@ public:
   explicit Compilation(bool printIR = false);
   mlir::OwningOpRef<mlir::ModuleOp> readTileIR(llvm::StringRef bytecode);
   mlir::OwningOpRef<mlir::ModuleOp> readMLIR(llvm::StringRef source);
-  // Runs the TileIR pipeline configured by `options`, then the backend passes.
+  // Runs the TileIR pipeline configured by `options`, then backend-specific
+  // passes.
   void
   lowerTileIR(mlir::ModuleOp module, llvm::StringRef options,
               llvm::function_ref<void(mlir::OpPassManager &)> addBackendPasses);

@@ -166,6 +166,8 @@ private:
     std::vector<ze_driver_handle_t> drivers(count);
     ZE_CHECK(zeDriverGet(&count, drivers.data()));
     ze_driver_handle_t driver = drivers.front();
+    // Count-only Level Zero queries require a fresh output count.
+    count = 0;
     ZE_CHECK(zeDeviceGet(driver, &count, nullptr));
     if (count == 0)
       throw std::runtime_error(
@@ -208,6 +210,7 @@ private:
     properties.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
     ZE_CHECK(zeKernelGetProperties(newFunction.get(), &properties));
 
+    count = 0;
     ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(device, &count, nullptr));
     std::vector<ze_command_queue_group_properties_t> queues(count);
     for (auto &queue : queues)

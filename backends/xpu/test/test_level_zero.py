@@ -101,7 +101,9 @@ ZE_APIEXPORT ze_result_t ZE_APICALL zeDriverGet(uint32_t *count, ze_driver_handl
   return ZE_RESULT_SUCCESS;
 }
 ZE_APIEXPORT ze_result_t ZE_APICALL zeDeviceGet(ze_driver_handle_t, uint32_t *count, ze_device_handle_t *out) {
-  FAIL("zeDeviceGet"); *count = 1;
+  FAIL("zeDeviceGet");
+  if (!out && *count != 0) return ZE_RESULT_ERROR_INVALID_NULL_HANDLE;
+  *count = 1;
   if (out) *out = reinterpret_cast<ze_device_handle_t>(1);
   return ZE_RESULT_SUCCESS;
 }
@@ -135,7 +137,9 @@ ZE_APIEXPORT ze_result_t ZE_APICALL zeKernelGetProperties(ze_kernel_handle_t han
   return ZE_RESULT_SUCCESS;
 }
 ZE_APIEXPORT ze_result_t ZE_APICALL zeDeviceGetCommandQueueGroupProperties(ze_device_handle_t, uint32_t *count, ze_command_queue_group_properties_t *out) {
-  FAIL("zeDeviceGetCommandQueueGroupProperties"); *count = 1;
+  FAIL("zeDeviceGetCommandQueueGroupProperties");
+  if (!out && *count != 0) return ZE_RESULT_ERROR_INVALID_NULL_HANDLE;
+  *count = 1;
   if (out) { out->flags = ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE; out->numQueues = 1; }
   return ZE_RESULT_SUCCESS;
 }

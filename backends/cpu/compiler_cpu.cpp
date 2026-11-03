@@ -3,9 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "LowerVectorScan.h"
 #include "amx.h"
-#include "compiler.h"
 #include "lld/Common/Driver.h"
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Conversion/TileIRToMLIR/Passes.h"
@@ -15,9 +13,11 @@
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/Transform/Transforms/Passes.h"
 #include "mlir/Dialect/Vector/Transforms/Passes.h"
+#include "mlir/LowerVectorScan.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
+#include "mlir/compiler.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -103,7 +103,6 @@ lowerToLLVM(Compilation &compilation, mlir::ModuleOp module,
   pm.nest<mlir::func::FuncOp>().addPass(
       mlir::vector::createLowerVectorMultiReductionPass(
           mlir::vector::VectorMultiReductionLowering::InnerReduction));
-  pm.addPass(createLowerVectorScanPass());
   pm.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
   pm.addPass(mlir::memref::createExpandStridedMetadataPass());
   pm.addPass(mlir::createCanonicalizerPass());
@@ -236,6 +235,7 @@ static std::string compileCPU(llvm::StringRef bytecode,
       "assume-in-bounds=" +
           std::string(assumeInBounds ? "true" : "false"),
       [&](mlir::OpPassManager &pm) {
+        pm.addPass(createLowerVectorScanPass());
         pm.addPass(mlir::createLoopInvariantCodeMotionPass());
         pm.addPass(mlir::createConvertMemrefArgsToPtrArgsPass());
         if (packArguments)

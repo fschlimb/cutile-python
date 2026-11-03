@@ -85,8 +85,8 @@ build notes at the top of the
 
 Native sources are organized by backend: `cpu/` and `xpu/` each contain
 `compiler_<backend>.cpp`, `launcher_<backend>.cpp`, and a `test/` directory.
-Shared compiler sources (`compiler.cpp` and `compiler.h`) and compiler build
-rules (`compiler.cmake`) live directly in this directory; shared tests live in
+Shared MLIR compiler sources live in `mlir/`, compiler build rules
+(`compiler.cmake`) live directly in this directory, and shared tests live in
 `test/`.
 
 Run all backend tests with `python -m pytest backends`, or select
