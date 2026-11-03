@@ -8,6 +8,7 @@ module attributes {transform.with_named_sequence} {
   transform.named_sequence @__transform_nano(%root: !transform.any_op {transform.readonly}) {
     %funcs = transform.structured.match ops{["func.func"]} in %root : (!transform.any_op) -> !transform.any_op
     transform.apply_patterns to %funcs {
+      transform.apply_patterns.vector.cast_away_vector_leading_one_dim
       transform.apply_patterns.vector.drop_unit_dims_with_shape_cast
     } : !transform.any_op
     transform.yield

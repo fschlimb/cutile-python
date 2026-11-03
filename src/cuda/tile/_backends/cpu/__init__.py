@@ -15,8 +15,9 @@ Blocks use static OpenMP scheduling without a grid-sized coordinate array.
 One worker and single-block grids bypass parallel dispatch.
 The launcher uses the system GCC OpenMP runtime (libgomp.so.1), not a bundled copy.
 
-Before general lowering, cpu_schedule.mlir selects generic patterns on any
-host, x86 contraction-loop preparation on x86-64, and AMX lowering only when
+Before general lowering, cpu_schedule.mlir removes leading unit vector
+dimensions, including on transfer operations, on any host. It selects x86
+contraction-loop preparation on x86-64, and AMX lowering only when
 AMX tile, BF16, and INT8 are available. Final LLVM conversion lowers AMX
 operations and loop-carried tile types together with control flow. On Linux
 x86-64, importing the launcher requests process-wide tile-data permission.

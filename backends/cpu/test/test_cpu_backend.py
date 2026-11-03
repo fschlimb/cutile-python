@@ -561,6 +561,55 @@ def test_native_sfc_bfloat16_matmul(blocking_factor_k, threads):
 
 
 @pytest.mark.usefixtures("native_cpu")
+def test_amx_schedule_lowers_blocked_bfloat16_matmul():
+    source = b"""
+module {
+  func.func @blocked_matmul(
+      %a: memref<?x?x?x?xbf16, strided<[?, ?, ?, 1]>>,
+      %b: memref<?x?x?x?x?xbf16, strided<[?, ?, ?, ?, 1]>>,
+      %out: memref<32x32xf32>, %m: index, %n: index,
+      %start: index, %end: index) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %pad = arith.constant 0.0 : bf16
+    %zero = arith.constant dense<0.0> : vector<32x32xf32>
+    %result = scf.for %k = %start to %end step %c1
+        iter_args(%acc = %zero) -> (vector<32x32xf32>) {
+      %av = vector.transfer_read %a[%m, %k, %c0, %c0], %pad
+          {in_bounds = [true, true, true, true]}
+          : memref<?x?x?x?xbf16, strided<[?, ?, ?, 1]>>, vector<1x1x32x32xbf16>
+      %lhs = vector.shape_cast %av : vector<1x1x32x32xbf16> to vector<32x32xbf16>
+      %bv = vector.transfer_read %b[%n, %k, %c0, %c0, %c0], %pad
+          {in_bounds = [true, true, true, true, true]}
+          : memref<?x?x?x?x?xbf16, strided<[?, ?, ?, ?, 1]>>, vector<1x1x16x32x2xbf16>
+      %bt = vector.transpose %bv, [0, 1, 2, 4, 3]
+          : vector<1x1x16x32x2xbf16> to vector<1x1x16x2x32xbf16>
+      %rhs = vector.shape_cast %bt : vector<1x1x16x2x32xbf16> to vector<32x32xbf16>
+      %next = vector.contract {
+          indexing_maps = [affine_map<(m, n, k) -> (m, k)>,
+                           affine_map<(m, n, k) -> (k, n)>,
+                           affine_map<(m, n, k) -> (m, n)>],
+          iterator_types = ["parallel", "parallel", "reduction"],
+          kind = #vector.kind<add>}
+          %lhs, %rhs, %acc
+          : vector<32x32xbf16>, vector<32x32xbf16> into vector<32x32xf32>
+      scf.yield %next : vector<32x32xf32>
+    }
+    vector.transfer_write %result, %out[%c0, %c0] {in_bounds = [true, true]}
+        : vector<32x32xf32>, memref<32x32xf32>
+    return
+  }
+}
+"""
+    llvm_ir = cpu.native_compiler("cpu").lower_cpu_mlir(
+        source, cpu._TRANSFORM_SCHEDULE, "__transform_nano_amx")
+    dot_products = [line for line in llvm_ir.splitlines()
+                    if b"call " in line and b"@llvm.x86.tdpbf16ps" in line]
+    assert len(dot_products) == 4
+    assert b"@llvm.fma" not in llvm_ir
+
+
+@pytest.mark.usefixtures("native_cpu")
 def test_only_the_amx_schedule_emits_amx(monkeypatch, tmp_path):
     from cuda.tile._cext import default_tile_context
 
