@@ -68,6 +68,8 @@ def cutile_fmha(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor,
 
     Batch, Heads, SeqLen_Q, D_k = Q.shape
     _, KV_Heads, SeqLen_KV, D_v = V.shape
+    if D_v != D_k:
+        raise ValueError("The FMHA kernel requires matching query/key and value head dimensions.")
     even_k = (SeqLen_KV % tile_n) == 0
 
     if qk_scale is None:

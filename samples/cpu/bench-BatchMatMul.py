@@ -56,7 +56,10 @@ def bmm(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
     grid = (Batch, ceil(M / tm_val), ceil(N / tn_val))
 
     # --- Launch kernel ---
-    with ct.backend_options({"num_cpu_threads": num_cpu_threads, "assume_in_bounds": True}):
+    with ct.backend_options({
+        "num_cpu_threads": num_cpu_threads,
+        "assume_in_bounds": M % tm_val == 0 and N % tn_val == 0 and K % tk_val == 0,
+    }):
         ct.launch(None, grid, batch_matmul_kernel,
                   (a, b, output, tm_val, tn_val, tk_val))
 
