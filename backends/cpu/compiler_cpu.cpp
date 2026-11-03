@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include "LowerVectorScan.h"
 #include "amx.h"
 #include "compiler.h"
 #include "lld/Common/Driver.h"
@@ -102,6 +103,7 @@ lowerToLLVM(Compilation &compilation, mlir::ModuleOp module,
   pm.nest<mlir::func::FuncOp>().addPass(
       mlir::vector::createLowerVectorMultiReductionPass(
           mlir::vector::VectorMultiReductionLowering::InnerReduction));
+  pm.addPass(createLowerVectorScanPass());
   pm.addPass(mlir::memref::createFoldMemRefAliasOpsPass());
   pm.addPass(mlir::memref::createExpandStridedMetadataPass());
   pm.addPass(mlir::createCanonicalizerPass());

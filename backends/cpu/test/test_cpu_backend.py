@@ -174,6 +174,25 @@ module {
     assert b"define i32 @identity" in llvm_ir
 
 
+@pytest.mark.usefixtures("native_cpu")
+def test_native_lowering_pipeline_lowers_vector_scan():
+    native = cpu.native_compiler("cpu")
+    source = b"""
+module {
+  func.func @scan(%input: vector<4xf32>) -> vector<4xf32> {
+    %zero = arith.constant dense<0.0> : vector<f32>
+    %scan, %acc = vector.scan <add>, %input, %zero reduction_dim = 0, inclusive = true :
+      vector<4xf32>, vector<f32>
+    return %scan : vector<4xf32>
+  }
+}
+"""
+    llvm_ir = native.lower_cpu_mlir(
+        source, cpu._TRANSFORM_SCHEDULE, "__transform_nano")
+    assert b"@scan" in llvm_ir
+    assert b"vector.scan" not in llvm_ir
+
+
 def test_backend_registration_accepts_builtin_cpu():
     _backend.set_backend("cpu")
     try:

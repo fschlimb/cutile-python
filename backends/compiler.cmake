@@ -24,7 +24,11 @@ set_target_properties(_compiler PROPERTIES
     BUILD_WITH_INSTALL_RPATH TRUE)
 
 if(CUTILE_BUILD_VARIANT STREQUAL "cpu")
-    target_sources(_compiler PRIVATE cpu/compiler_cpu.cpp)
+    target_sources(_compiler PRIVATE cpu/compiler_cpu.cpp cpu/LowerVectorScan.cpp)
+    if(NOT LLVM_ENABLE_RTTI)
+        set_source_files_properties(cpu/LowerVectorScan.cpp PROPERTIES
+            COMPILE_OPTIONS "-fno-rtti")
+    endif()
     target_include_directories(_compiler SYSTEM PRIVATE
         "${LLVM_MAIN_SRC_DIR}/../lld/include")
     target_link_libraries(_compiler PRIVATE
