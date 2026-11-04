@@ -42,7 +42,7 @@ from cuda.tile._cext import default_tile_context
 from cuda.tile._exception import TileCompilerTimeoutError
 
 # TileIR bytecode version read by the native compiler's TileIRToMLIR.
-BYTECODE_VERSION = "13.3"
+BYTECODE_VERSION = "13.4"
 
 
 def file_fingerprint(path: str) -> str:
