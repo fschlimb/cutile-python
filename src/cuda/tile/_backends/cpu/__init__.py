@@ -22,6 +22,9 @@ AMX tile, BF16, and INT8 are available. Final LLVM conversion lowers AMX
 operations and loop-carried tile types together with control flow. On Linux
 x86-64, importing the launcher requests process-wide tile-data permission.
 If permission is denied, schedule selection uses the x86 path without AMX.
+After the schedule, math functions except sin and cos are replaced by
+polynomial approximations so they stay vectorized; LLVM would otherwise
+scalarize vector math intrinsics into per-element libm calls.
 
 The compiler and TileIRToMLIR are LLVM external projects in the persistent
 build/llvm tree. Shared compiler invocation and timeout handling live in

@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include "ApproximateMath.h"
 #include "amx.h"
 #include "lld/Common/Driver.h"
 #include "mlir/Conversion/Passes.h"
@@ -95,6 +96,10 @@ lowerToLLVM(Compilation &compilation, mlir::ModuleOp module,
       (entryPoint.empty() ? cpuTransformEntryPoint() : entryPoint).str();
   pm.addPass(
       mlir::transform::createInterpreterPass(std::move(interpreterOptions)));
+  pm.addPass(createLowerVectorScanPass());
+  // Must run before vector lowering: LLVM scalarizes vector math intrinsics
+  // into per-element libm calls.
+  pm.addPass(createApproximateMathPass());
 
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(mlir::createLoopInvariantCodeMotionPass());
