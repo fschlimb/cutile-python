@@ -85,7 +85,7 @@ def cutile_fmha(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor,
     # --- Build XPU options ---
     launch_options = {
         "block_threads": (1, 32, 16),
-        "assume_in_bounds": True,
+        "assume_in_bounds": False,
         **(options or {}),
     }
 
