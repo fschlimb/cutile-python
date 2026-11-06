@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import heapq
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Sequence, TypeVar
+from functools import partial
+from typing import Any, Callable, ContextManager, Generic, Sequence, TypeVar
 
+from cuda.tile import _backends as _backend
 from cuda.tile._cext import _benchmark
 from cuda.tile._execution import kernel as TileKernel
 from cuda.tile.tune._tune_utils import benchmark_with_timeout
@@ -133,19 +136,21 @@ def exhaustive_search(
     search_space: Sequence[T],
     stream,
     grid_fn: Callable[[T], tuple[int, ...]],
-    kernel: TileKernel | Callable[[T], TileKernel],
+    kernel: TileKernel | Callable[[T], TileKernel] | None,
     args_fn: Callable[[T], tuple[Any, ...]],
     hints_fn: Callable[[T], dict[str, Any]] | None = None,
     *,
     quiet: bool = False,
     single_run_timeout_sec: float | None = None,
     flush_l2: bool = True,
+    benchmark_fn: Callable[..., float] | None = None,
+    context_fn: Callable[[T], ContextManager[Any]] | None = None,
 ) -> TuningResult[T]:
     """Searches the entire search space and return the best configuration.
 
     Args:
         search_space: Sequence of configs to evaluate.
-        stream: The CUDA stream to execute kernel on.
+        stream: The stream to execute kernel on (``None`` for the CPU backend).
         grid_fn: Maps a config to grid dimensions.
         kernel: The kernel to tune, or a function mapping a config to the kernel to
             tune. For best performance when using a function, return the same kernel
@@ -156,9 +161,16 @@ def exhaustive_search(
         single_run_timeout_sec: Wall-time timeout (in seconds) per kernel launch,
             enforced by running benchmarks in a subprocess. When None (the
             default), timeouts are disabled and kernels run directly without a
-            subprocess.
+            subprocess. Requires CUDA; not supported by custom backends.
         flush_l2: Flush L2 before each kernel run. Defaults to True. Set to False
-            to measure without deliberately evicting cached data.
+            to measure without deliberately evicting cached data. Ignored by
+            custom backends.
+        benchmark_fn: Optional ``benchmark_fn(stream, grid, kernel, args, flush_l2)``
+            timing one call in microseconds, used instead of launching ``kernel``.
+            ``kernel`` may then be ``None``. Not supported with
+            ``single_run_timeout_sec``.
+        context_fn: Optional context manager factory scoped around each
+            configuration's preparation and each of its timing runs.
 
 
     Returns:
@@ -244,6 +256,10 @@ def exhaustive_search(
 
     if total == 0:
         raise ValueError("Search space is empty.")
+    if kernel is None and benchmark_fn is None:
+        raise ValueError("kernel can only be None with benchmark_fn.")
+    if single_run_timeout_sec is not None and benchmark_fn is not None:
+        raise ValueError("single_run_timeout_sec is not supported with benchmark_fn.")
 
     # min-heap of running candidates, sorted by (mean_us, error_margin_us).
     # The integer tie-breaker keeps heap operations stable when timings match.
@@ -256,16 +272,26 @@ def exhaustive_search(
     for i, cfg in enumerate(search_space):
         if not quiet and isatty:
             progress(0, i, total, len(errors))
-        grid = grid_fn(cfg)
-        base_kernel = kernel if isinstance(kernel, TileKernel) else kernel(cfg)
-        hints = hints_fn(cfg) if hints_fn is not None else {}
-        updated_kernel = base_kernel.replace_hints(**hints)
+        context = partial(context_fn, cfg) if context_fn is not None else nullcontext
+        with context():
+            grid = grid_fn(cfg)
+            updated_kernel = None
+            if kernel is not None:
+                base_kernel = kernel if isinstance(kernel, TileKernel) else kernel(cfg)
+                hints = hints_fn(cfg) if hints_fn is not None else {}
+                updated_kernel = base_kernel.replace_hints(**hints)
+                if (single_run_timeout_sec is not None
+                        and _backend.get_backend() is not None):
+                    raise ValueError(
+                        "single_run_timeout_sec is not supported by custom backends.")
         candidate = _TimingCandidate(
             config=cfg,
             grid=grid,
             kernel=updated_kernel,
             get_args=lambda _cfg=cfg: args_fn(_cfg),
             flush_l2=flush_l2,
+            benchmark_fn=benchmark_fn or _benchmark_launch,
+            context=context,
         )
 
         try:
@@ -348,6 +374,13 @@ _WARM_UP_REPEATS = 3
 _TOP_K = 5
 
 
+def _benchmark_launch(stream, grid, kernel, args, flush_l2: bool) -> float:
+    """Time one launch in microseconds where :func:`cuda.tile.launch` would run it."""
+    if _backend.get_backend() is not None:
+        return _backend.benchmark(stream, grid, kernel, args)
+    return _benchmark(stream, grid, kernel, args, flush_l2)
+
+
 @dataclass
 class _TimingCandidate(Generic[T]):
     config: T
@@ -355,6 +388,8 @@ class _TimingCandidate(Generic[T]):
     kernel: Any
     get_args: Callable[[], tuple[Any, ...]]
     flush_l2: bool
+    benchmark_fn: Callable[..., float]
+    context: Callable[[], ContextManager[Any]]
     num_samples: int = 0
     mean_us: float = 0.0
     m2: float = 0.0
@@ -363,19 +398,24 @@ class _TimingCandidate(Generic[T]):
     def warmup(self, stream, num_times, launch_timeout_sec):
         assert num_times > 0
 
-        for i in range(num_times):
-            if i == 0 and launch_timeout_sec is not None:
-                # First warmup is timed to ensure it doesn't deadlock.
-                benchmark_with_timeout(
-                    stream, self.grid, self.kernel, self.get_args(), launch_timeout_sec,
-                    self.flush_l2)
-            else:
-                _benchmark(stream, self.grid, self.kernel, self.get_args(), self.flush_l2)
+        with self.context():
+            for i in range(num_times):
+                if i == 0 and launch_timeout_sec is not None:
+                    # First warmup is timed to ensure it doesn't deadlock.
+                    benchmark_with_timeout(
+                        stream, self.grid, self.kernel, self.get_args(), launch_timeout_sec,
+                        self.flush_l2)
+                else:
+                    self._time(stream)
 
     def run_benchmark(self, stream, num_times):
-        for _ in range(min(num_times, _MAX_REPEATS - self.num_samples)):
-            self._add_sample(_benchmark(
-                stream, self.grid, self.kernel, self.get_args(), self.flush_l2))
+        with self.context():
+            for _ in range(min(num_times, _MAX_REPEATS - self.num_samples)):
+                self._add_sample(self._time(stream))
+
+    def _time(self, stream) -> float:
+        return self.benchmark_fn(
+            stream, self.grid, self.kernel, self.get_args(), self.flush_l2)
 
     def converged(self) -> bool:
         # Stop if ...

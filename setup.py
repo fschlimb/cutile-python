@@ -6,11 +6,42 @@ from setuptools import setup
 from setuptools.command.build_ext import build_ext
 from setuptools.extension import Extension
 import os
+import shlex
 import sys
+import tempfile
 
 
-project_root = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.realpath(__file__))
 is_windows = sys.platform == "win32"
+
+# Every build variant builds the _cext extension. The non-CUDA variants (see
+# backends/README.md) also build their backend from backends/ and stage it, with
+# its runtime files, into cuda/tile/_backends with `cmake --install`.
+_backend_extensions = {
+    "cpu": "cuda.tile._backends.cpu._cpu",
+}
+build_variant = os.getenv("CUTILE_BUILD_VARIANT", "cuda")
+if build_variant != "cuda" and build_variant not in _backend_extensions:
+    raise RuntimeError("CUTILE_BUILD_VARIANT must be one of: "
+                       f"{', '.join(['cuda', *_backend_extensions])}")
+
+
+def _backend_cmake_args():
+    """CMake arguments of the non-CUDA variants, including those from CMAKE_ARGS."""
+    args = shlex.split(os.getenv("CMAKE_ARGS", ""))
+    if "CUDAToolkit_ROOT" in os.environ:
+        return args
+    # Without a CUDA Toolkit, take the headers _cext needs from the
+    # cuda-toolkit[cudart,nvvm] wheels.
+    try:
+        import nvidia
+    except ImportError:
+        return args
+    for path in nvidia.__path__:
+        root = os.path.join(path, "cu13")
+        if os.path.isfile(os.path.join(root, "include", "cuda.h")):
+            return [f"-DCUDAToolkit_ROOT={root}", *args]
+    return args
 
 
 class BuildExtWithCmake(build_ext):
@@ -52,7 +83,10 @@ class BuildExtWithCmake(build_ext):
                      f"-DXLA_PATH={xla_path}",
                      f"-DCMAKE_BUILD_TYPE={build_type}",
                      f"-DPython_EXECUTABLE={sys.executable}",
-                     "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"]
+                     "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+                     f"-DCUTILE_BUILD_VARIANT={build_variant}"]
+        if build_variant != "cuda":
+            cmake_cmd.extend(_backend_cmake_args())
         if self.disable_internal:
             cmake_cmd.append("-DDISABLE_INTERNAL=1")
         if self.minimal_internal:
@@ -82,7 +116,14 @@ class BuildExtWithCmake(build_ext):
         self._cmake(build_dir, build_type, dlpack_path, xla_path)
         self._make(build_dir, build_type, parallel)
 
+        if build_variant != "cuda":
+            prefix = os.path.join(project_root, "src") if self.editable_mode else self.build_lib
+            self.spawn(["cmake", "--install", build_dir, "--prefix", os.path.abspath(prefix),
+                        "--component", "cuTileBackend"])
+
         for ext in self.extensions:
+            if ext.name in _backend_extensions.values():
+                continue  # installed by `cmake --install` above
             src_dir = _get_csrc_dir(ext.name)
             ext_name = _get_build_lib_filename(ext.name)
             if is_windows:
@@ -90,9 +131,22 @@ class BuildExtWithCmake(build_ext):
             else:
                 ext_build_path = os.path.join(build_dir, src_dir, ext_name)
             ext_path = self.get_ext_fullpath(ext.name)
-            # Create a symlink to the build directory if in editable mode, otherwise copy
-            link = "sym" if self.editable_mode else None
-            file_util.copy_file(ext_build_path, ext_path, update=1, link=link)
+            if self.editable_mode:
+                _link_editable_extension(ext_build_path, ext_path)
+            else:
+                file_util.copy_file(ext_build_path, ext_path, update=1)
+
+
+def _link_editable_extension(src: str, dst: str):
+    src = os.path.abspath(src)
+    if not os.path.isfile(src):
+        raise FileNotFoundError(src)
+    if os.path.islink(dst) and os.readlink(dst) == src:
+        return
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(dst)) as temp_dir:
+        link = os.path.join(temp_dir, os.path.basename(dst))
+        os.symlink(src, link)
+        os.replace(link, dst)
 
 
 def _get_csrc_dir(ext_name: str):
@@ -110,8 +164,12 @@ def _get_build_lib_filename(ext_name: str):
 
 
 setup(
+    options=({"build": {"build_base": "build/python-" + build_variant}}
+             if build_variant != "cuda" else {}),
     ext_modules=[
         Extension("cuda.tile._cext", []),
+        *([Extension(_backend_extensions[build_variant], [])]
+          if build_variant != "cuda" else []),
     ],
     cmdclass=dict(
         build_ext=BuildExtWithCmake,

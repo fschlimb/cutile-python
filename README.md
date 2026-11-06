@@ -8,6 +8,46 @@ cuTile Python is a programming language for NVIDIA GPUs. The official documentat
 on [docs.nvidia.com](https://docs.nvidia.com/cuda/cutile-python),
 or built from source located in the [docs](docs/) folder.
 
+> [!NOTE]
+> Non-CUDA Backends (Experimental)
+> --------------------------------
+>
+> Non-CUDA backend support on Linux is experimental. The CPU backend is available,
+> and Intel GPU (XPU) support is planned. Backends integrate by intercepting
+> TileIR, a design that could also support other platforms.
+>
+> To build the CPU backend from source, install the prerequisites below, then run
+> these commands from the repository root:
+>
+> ```bash
+> uv venv --python 3.12
+> source .venv/bin/activate
+>
+> CUTILE_BUILD_VARIANT=cpu uv sync --group cpu --no-build-isolation-package cuda-tile
+> ```
+>
+> - **CPU:** requires GCC with OpenMP, Clang, and LLD. See the
+>   [CPU guide](backends/cpu/README.md) for prerequisites, sample runs, and usage.
+>
+> The CPU build does not require an NVIDIA GPU or CUDA driver. Each environment supports
+> one build variant. See the [backend overview](backends/README.md) for runtime
+> selection and shared behavior.
+>
+> Autotuning (New Feature)
+>------------------------
+>
+> `ct.autotune` benchmarks candidate compile-time configurations
+> on the first launch, then reuses the fastest configuration for inputs with the same layout.
+>
+> ```python
+> @ct.autotune(
+>     configs=[ct.tune.Config({"TILE": 128}), ct.tune.Config({"TILE": 256})],
+>     grid=lambda meta: (ct.cdiv(meta["N"], meta["TILE"]),),
+> )
+> @ct.kernel
+> def my_kernel(x, N: ct.Constant[int], TILE: ct.Constant[int]):
+>     ...
+> ```
 
 Example
 -------

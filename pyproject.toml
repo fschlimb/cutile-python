@@ -64,13 +64,66 @@ include = [
     "cuda.tile._passes",
     "cuda.tile._bytecode",
     "cuda.tile._library_lifecycle",
+    "cuda.tile._backends",
+    "cuda.tile._backends.cpu",
     "cuda.tile.tune",
     "cuda.tile.jax",
 ]
 
 [tool.setuptools.package-data]
 "cuda.tile" = ["VERSION", "_cext.pyi"]
+"cuda.tile._backends.cpu" = ["*.mlir"]
 
+
+# Development environments of the non-CUDA variants, which build cuda-tile from
+# source without build isolation (see backends/README.md):
+#   CUTILE_BUILD_VARIANT=cpu uv sync --group cpu --no-build-isolation-package cuda-tile
+# Dependency groups are not part of the package metadata.
+[dependency-groups]
+backend-build = [
+    # Without build isolation, [build-system] requirements must be installed too.
+    "setuptools==84.0.0",
+    "wheel",
+    "cmake>=3.24,<4",
+    "ninja",
+    "nanobind>=2.9,<3",
+    "pybind11>=2.13.1",
+    # CUDA headers for building _cext without a CUDA Toolkit.
+    "cuda-toolkit[cudart,nvvm]>=13.2,<13.6; sys_platform == 'linux'",
+]
+cpu = [
+    { include-group = "backend-build" },
+    "numpy",
+    "torch",
+]
 
 [tool.uv]
 managed = true
+# Without this, uv derives a key from `packages.find.where` and stores it as an
+# mtime while comparing it as an inode, so it rebuilds on every sync.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "setup.py" },
+    { file = "CMakeLists.txt" },
+    { file = "cmake/**" },
+    { file = "cext/**" },
+    # Native sources of the non-CUDA variants.
+    { file = "backends/**/CMakeLists.txt" },
+    { file = "backends/**/*.cmake" },
+    { file = "backends/**/*.in" },
+    { file = "backends/**/*.cpp" },
+    { file = "backends/**/*.h" },
+    { env = "CUTILE_BUILD_VARIANT" },
+    { env = "CMAKE_ARGS" },
+    { env = "USE_LLVM_REVISION" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", group = "cpu" },
+]

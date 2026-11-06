@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) <2026> Intel Corporation. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+cmake_minimum_required(VERSION 3.20)
+set(_source [==[@CUTILE_LLVM_SOURCE_DIR@/llvm]==])
+set(_binary [==[@CUTILE_LLVM_BINARY_DIR@]==])
+set(_args [==[@_cutile_llvm_cmake_args@]==])
+set(_targets [==[@_cutile_llvm_build_targets@]==])
+string(REPLACE "|" "\\;" _args "${_args}")
+string(SHA256 _request "${CMAKE_COMMAND};${_source};${_args}")
+
+set(_cache "${_binary}/CMakeCache.txt")
+set(_stamp "${_binary}/cutile-configure.stamp")
+set(_state "")
+if(EXISTS "${_cache}" AND EXISTS "${_binary}/build.ninja")
+    file(SHA256 "${_cache}" _cache_hash)
+    set(_state "${_request}\n${_cache_hash}\n")
+endif()
+set(_saved "")
+if(EXISTS "${_stamp}")
+    file(READ "${_stamp}" _saved)
+endif()
+# The shared LLVM tree may have been reconfigured by another outer build or
+# manually. Ninja handles source/CMake-file changes on otherwise matching builds.
+if(NOT _state OR NOT _state STREQUAL _saved)
+    file(REMOVE "${_stamp}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -S "${_source}" -B "${_binary}" -G Ninja ${_args}
+        COMMAND_ERROR_IS_FATAL ANY)
+endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --build "${_binary}" --target ${_targets}
+    COMMAND_ERROR_IS_FATAL ANY)
+file(SHA256 "${_cache}" _cache_hash)
+file(WRITE "${_stamp}" "${_request}\n${_cache_hash}\n")

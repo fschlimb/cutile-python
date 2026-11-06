@@ -114,6 +114,11 @@ endif()
 add_subdirectory(cext)
 add_subdirectory(experimental/cuda-lang/)
 
+# The non-CUDA variant (cpu) additionally builds its backend; see backends/README.md.
+if (CUTILE_BUILD_VARIANT AND NOT CUTILE_BUILD_VARIANT STREQUAL "cuda")
+    add_subdirectory(backends)
+endif()
+
 
 option(DISABLE_INTERNAL "disable internal" OFF)
 if (NOT DISABLE_INTERNAL)
